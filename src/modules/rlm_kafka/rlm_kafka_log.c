@@ -34,10 +34,9 @@ RCSID("$Id$")
 #include <fcntl.h>
 #include <sys/stat.h>
 
-static int sql_log_instantiate(CONF_SECTION *conf, void **instance);
-static int sql_log_detach(void *instance);
-static int sql_log_accounting(void *instance, REQUEST *request);
-static int sql_log_postauth(void *instance, REQUEST *request);
+static int kafka_log_instantiate(CONF_SECTION *conf, void **instance);
+static int kafka_log_detach(void *instance);
+static int kafka_log_accounting(void *instance, REQUEST *request);
 
 #define MAX_QUERY_LEN 4096
 
@@ -45,10 +44,9 @@ static int sql_log_postauth(void *instance, REQUEST *request);
  *	Define a structure for our module configuration.
  */
 typedef struct rlm_kafka_log_config_t {
-	char		*path;
-	char		*postauth_query;
-	char		*sql_user_name;
-	char		*allowed_chars;
+	char		*broker;
+	char		*topic;
+	int 		port;
 	CONF_SECTION	*conf_section;
 } rlm_kafka_log_config_t;
 
@@ -56,20 +54,15 @@ typedef struct rlm_kafka_log_config_t {
  *	A mapping of configuration file names to internal variables.
  */
 static const CONF_PARSER module_config[] = {
-	{"path", PW_TYPE_STRING_PTR,
-	 offsetof(rlm_kafka_log_config_t,path), NULL, "${radacctdir}/sql-relay"},
-	{"Post-Auth", PW_TYPE_STRING_PTR,
-	 offsetof(rlm_kafka_log_config_t,postauth_query), NULL, ""},
-	{"sql_user_name", PW_TYPE_STRING_PTR,
-	 offsetof(rlm_kafka_log_config_t,sql_user_name), NULL, ""},
-	{"safe-characters", PW_TYPE_STRING_PTR,
-	 offsetof(rlm_kafka_log_config_t,allowed_chars), NULL,
-	"@abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_: /"},
+	{"broker", PW_TYPE_STRING_PTR,
+	 offsetof(rlm_kafka_log_config_t,broker), NULL, "localhost"},
+	{"topic", PW_TYPE_STRING_PTR,
+	 offsetof(rlm_kafka_log_config_t,topic), NULL, NULL},
+	{"port", PW_TYPE_INTEGER,
+	 offsetof(rlm_kafka_log_config_t,port), NULL, NULL},
 
 	{ NULL, -1, 0, NULL, NULL }	/* end the list */
 };
-
-static char *allowed_chars = NULL;
 
 /*
  *	Do any per-module initialization that is separate to each
@@ -81,39 +74,40 @@ static char *allowed_chars = NULL;
  *	that must be referenced in later calls, store a handle to it
  *	in *instance otherwise put a null pointer there.
  */
-static int sql_log_instantiate(CONF_SECTION *conf, void **instance)
+static int kafka_log_instantiate(CONF_SECTION *conf, void **instance)
 {
 	rlm_kafka_log_config_t	*inst;
 
-        /*
-         *      Set up a storage area for instance data.
-         */
-        inst = calloc(1, sizeof(rlm_kafka_log_config_t));
-        if (inst == NULL) {
-                radlog(L_ERR, "rlm_sql_log: Not enough memory");
-                return -1;
-        }
+	/*
+	 *      Set up a storage area for instance data.
+	 */
+	inst = calloc(1, sizeof(rlm_kafka_log_config_t));
+	if (inst == NULL) {
+	        radlog(L_ERR, "rlm_kafka_log: Not enough memory");
+	        return -1;
+	}
 
 	/*
 	 *	If the configuration parameters can't be parsed,
 	 *	then fail.
 	 */
 	if (cf_section_parse(conf, inst, module_config) < 0) {
-		radlog(L_ERR, "rlm_sql_log: Unable to parse parameters");
-		sql_log_detach(inst);
+		radlog(L_ERR, "rlm_kafka_log: Unable to parse parameters");
+		kafka_log_detach(inst);
 		return -1;
 	}
 
 	inst->conf_section = conf;
-	allowed_chars = inst->allowed_chars;
 	*instance = inst;
+
+
 	return 0;
 }
 
 /*
  *	Say goodbye to the cruel world.
  */
-static int sql_log_detach(void *instance)
+static int kafka_log_detach(void *instance)
 {
 	int i;
 	char **p;
@@ -145,210 +139,26 @@ static int sql_log_detach(void *instance)
 }
 
 /*
- *	Translate the SQL queries.
+ *	Write the line into kafka
  */
-static size_t sql_escape_func(char *out, size_t outlen, const char *in)
+static int kafka_log_produce(rlm_kafka_log_config_t *inst, REQUEST *request, const char *line)
 {
-	int len = 0;
 
-	while (in[0]) {
-		/*
-		 *	Non-printable characters get replaced with their
-		 *	mime-encoded equivalents.
-		 */
-		if ((in[0] < 32) ||
-		    strchr(allowed_chars, *in) == NULL) {
-			/*
-			 *	Only 3 or less bytes available.
-			 */
-			if (outlen <= 3) {
-				break;
-			}
-
-			snprintf(out, outlen, "=%02X", (unsigned char) in[0]);
-			in++;
-			out += 3;
-			outlen -= 3;
-			len += 3;
-			continue;
-		}
-
-		/*
-		 *	Only one byte left.
-		 */
-		if (outlen <= 1) {
-			break;
-		}
-
-		/*
-		 *	Allowed character.
-		 */
-		*out = *in;
-		out++;
-		in++;
-		outlen--;
-		len++;
-	}
-	*out = '\0';
-	return len;
-}
-
-/*
- *	Add the 'SQL-User-Name' attribute to the packet.
- */
-static int sql_set_user(rlm_kafka_log_config_t *inst, REQUEST *request, char *sqlusername, const char *username)
-{
-	VALUE_PAIR *vp=NULL;
-	char tmpuser[MAX_STRING_LEN];
-
-	tmpuser[0] = '\0';
-	sqlusername[0] = '\0';
-
-	rad_assert(request != NULL);
-	rad_assert(request->packet != NULL);
-
-	/* Remove any user attr we added previously */
-	pairdelete(&request->packet->vps, PW_SQL_USER_NAME);
-
-	if (username != NULL) {
-		strlcpy(tmpuser, username, MAX_STRING_LEN);
-	} else if (inst->sql_user_name[0] != '\0') {
-		radius_xlat(tmpuser, sizeof(tmpuser), inst->sql_user_name,
-			    request, NULL);
-	} else {
-		return 0;
-	}
-
-	if (tmpuser[0] != '\0') {
-		strlcpy(sqlusername, tmpuser, sizeof(tmpuser));
-		RDEBUG2("sql_set_user escaped user --> '%s'", sqlusername);
-		vp = pairmake("SQL-User-Name", sqlusername, 0);
-		if (vp == NULL) {
-			radlog(L_ERR, "%s", fr_strerror());
-			return -1;
-		}
-
-		pairadd(&request->packet->vps, vp);
-		return 0;
-	}
-	return -1;
-}
-
-/*
- *	Replace %<whatever> in the query.
- */
-static int sql_xlat_query(rlm_kafka_log_config_t *inst, REQUEST *request, const char *query, char *xlat_query, size_t len)
-{
-	char	sqlusername[MAX_STRING_LEN];
-
-	/* If query is not defined, we stop here */
-	if (query[0] == '\0')
-		return RLM_MODULE_NOOP;
-
-	/* Add attribute 'SQL-User-Name' */
-	if (sql_set_user(inst, request, sqlusername, NULL) <0) {
-		radlog_request(L_ERR, 0, request, 
-			       "Couldn't add SQL-User-Name attribute");
-		return RLM_MODULE_FAIL;
-	}
-
-	/* Expand variables in the query */
-	xlat_query[0] = '\0';
-	radius_xlat(xlat_query, len, query, request, sql_escape_func);
-	if (xlat_query[0] == '\0') {
-		radlog_request(L_ERR, 0, request, "Couldn't xlat the query %s",
-		       query);
-		return RLM_MODULE_FAIL;
-	}
-
-	return RLM_MODULE_OK;
-}
-
-/*
- *	The Perl version of radsqlrelay uses fcntl locks.
- */
-static int setlock(int fd)
-{
-#ifdef F_WRLCK
-	struct flock fl;
-	memset(&fl, 0, sizeof(fl));
-	fl.l_start = 0;
-	fl.l_len = 0;
-	fl.l_type = F_WRLCK;
-	fl.l_whence = SEEK_SET;
-	return fcntl(fd, F_SETLKW, &fl);
-#else
-	return -1;
-#endif
-}
-
-/*
- *	Write the line into file (with lock)
- */
-static int sql_log_write(rlm_kafka_log_config_t *inst, REQUEST *request, const char *line)
-{
-	int fd;
-	FILE *fp;
-	int locked = 0;
-	struct stat st;
-	char *p, path[1024];
-
-	path[0] = '\0';
-	radius_xlat(path, sizeof(path), inst->path, request, NULL);
-	if (path[0] == '\0') {
-		return RLM_MODULE_FAIL;
-	}
-
-	p = strrchr(path, '/');
-	if (p) {
-		*p = '\0';
-		rad_mkdir(path, 0755);
-		*p = '/';
-	}
-
-	while (!locked) {
-		if ((fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0666)) < 0) {
-			radlog_request(L_ERR, 0, request, "Couldn't open file %s: %s",
-				       path, strerror(errno));
-			return RLM_MODULE_FAIL;
-		}
-		if (setlock(fd) != 0) {
-			radlog_request(L_ERR, 0, request, "Couldn't lock file %s: %s",
-				       path, strerror(errno));
-			close(fd);
-			return RLM_MODULE_FAIL;
-		}
-		if (fstat(fd, &st) != 0) {
-			radlog_request(L_ERR, 0, request, "Couldn't stat file %s: %s",
-				       path, strerror(errno));
-			close(fd);
-			return RLM_MODULE_FAIL;
-		}
-		if (st.st_nlink == 0) {
-			RDEBUG("File %s removed by another program, retrying",
-			      path);
-			close(fd);
-			continue;
-		}
-		locked = 1;
-	}
-
-	if ((fp = fdopen(fd, "a")) == NULL) {
-		radlog_request(L_ERR, 0, request, "Couldn't associate a stream with file %s: %s",
+	/* ERROR EXAMPLE */
+	#if 0	
+	if ((fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0666)) < 0) {
+		radlog_request(L_ERR, 0, request, "Couldn't open file %s: %s",
 			       path, strerror(errno));
-		close(fd);
 		return RLM_MODULE_FAIL;
 	}
-	fputs(line, fp);
-	putc('\n', fp);
-	fclose(fp);	/* and unlock */
+	#endif
 	return RLM_MODULE_OK;
 }
 
 /*
  *	Write accounting information to this module's database.
  */
-static int sql_log_accounting(void *instance, REQUEST *request)
+static int kafka_log_accounting(void *instance, REQUEST *request)
 {
 	int		ret;
 	char		querystr[MAX_QUERY_LEN];
@@ -361,7 +171,7 @@ static int sql_log_accounting(void *instance, REQUEST *request)
 	rad_assert(request != NULL);
 	rad_assert(request->packet != NULL);
 
-	RDEBUG("Processing sql_log_accounting");
+	RDEBUG("Processing kafka_log_accounting");
 
 	/* Find the Acct Status Type. */
 	if ((pair = pairfind(request->packet->vps, PW_ACCT_STATUS_TYPE)) == NULL) {
@@ -380,38 +190,16 @@ static int sql_log_accounting(void *instance, REQUEST *request)
 		       dval->name);
 		return RLM_MODULE_NOOP;
 	}
-	cfquery = cf_pair_value(cp);
 
 	/* Xlat the query */
+	#if 0
 	ret = sql_xlat_query(inst, request, cfquery, querystr, sizeof(querystr));
 	if (ret != RLM_MODULE_OK)
 		return ret;
 
-	/* Write query into sql-relay file */
-	return sql_log_write(inst, request, querystr);
-}
-
-/*
- *	Write post-auth information to this module's database.
- */
-static int sql_log_postauth(void *instance, REQUEST *request)
-{
-	int		ret;
-	char		querystr[MAX_QUERY_LEN];
-	rlm_kafka_log_config_t	*inst = (rlm_kafka_log_config_t *)instance;
-
-	rad_assert(request != NULL);
-
-	RDEBUG("Processing sql_log_postauth");
-
-	/* Xlat the query */
-	ret = sql_xlat_query(inst, request, inst->postauth_query,
-			     querystr, sizeof(querystr));
-	if (ret != RLM_MODULE_OK)
-		return ret;
-
-	/* Write query into sql-relay file */
-	return sql_log_write(inst, request, querystr);
+	return kafka_log_produce(inst, request, querystr);
+	#endif
+	return RLM_MODULE_OK;
 }
 
 /*
@@ -427,16 +215,16 @@ module_t rlm_kafka_log = {
 	RLM_MODULE_INIT,
 	"sql_log",
 	RLM_TYPE_CHECK_CONFIG_SAFE | RLM_TYPE_HUP_SAFE,		/* type */
-	sql_log_instantiate,		/* instantiation */
-	sql_log_detach,			/* detach */
+	kafka_log_instantiate,		/* instantiation */
+	kafka_log_detach,			/* detach */
 	{
 		NULL,			/* authentication */
 		NULL,			/* authorization */
 		NULL,			/* preaccounting */
-		sql_log_accounting,	/* accounting */
+		kafka_log_accounting,	/* accounting */
 		NULL,			/* checksimul */
 		NULL,			/* pre-proxy */
 		NULL,			/* post-proxy */
-		sql_log_postauth	/* post-auth */
+		NULL			/* post-auth */
 	},
 };
