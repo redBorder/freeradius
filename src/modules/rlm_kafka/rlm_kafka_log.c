@@ -1,13 +1,13 @@
 /*
- *  rlm_sql_log.c	Append the SQL queries in a log file which
- *			is read later by the radsqlrelay program
+ *  rlm_kafka_log	Send the accounting information to an Apache kafka
+ *                  topic
  *
  *  Version:    $Id$
  *
- *  Author:     Nicolas Baradakis <nicolas.baradakis@cegetel.net>
+ *  Author:     Eugenio Perez <eupm90@gmail.com>
+ *              Based on Nicolas Baradakis sql_log
  *
- *  Copyright (C) 2005 Cegetel
- *  Copyright 2006 The FreeRADIUS server project
+ *  Copyright (C) 2014 Eneo Tecnologia
  *
  *  This program is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU General Public License
@@ -44,29 +44,26 @@ static int sql_log_postauth(void *instance, REQUEST *request);
 /*
  *	Define a structure for our module configuration.
  */
-typedef struct rlm_sql_log_t {
+typedef struct rlm_kafka_log_config_t {
 	char		*path;
 	char		*postauth_query;
 	char		*sql_user_name;
-	int		utf8;	
 	char		*allowed_chars;
 	CONF_SECTION	*conf_section;
-} rlm_sql_log_t;
+} rlm_kafka_log_config_t;
 
 /*
  *	A mapping of configuration file names to internal variables.
  */
 static const CONF_PARSER module_config[] = {
 	{"path", PW_TYPE_STRING_PTR,
-	 offsetof(rlm_sql_log_t,path), NULL, "${radacctdir}/sql-relay"},
+	 offsetof(rlm_kafka_log_config_t,path), NULL, "${radacctdir}/sql-relay"},
 	{"Post-Auth", PW_TYPE_STRING_PTR,
-	 offsetof(rlm_sql_log_t,postauth_query), NULL, ""},
+	 offsetof(rlm_kafka_log_config_t,postauth_query), NULL, ""},
 	{"sql_user_name", PW_TYPE_STRING_PTR,
-	 offsetof(rlm_sql_log_t,sql_user_name), NULL, ""},
-	{"utf8", PW_TYPE_BOOLEAN,
-         offsetof(rlm_sql_log_t,utf8), NULL, "no"},
+	 offsetof(rlm_kafka_log_config_t,sql_user_name), NULL, ""},
 	{"safe-characters", PW_TYPE_STRING_PTR,
-	 offsetof(rlm_sql_log_t,allowed_chars), NULL,
+	 offsetof(rlm_kafka_log_config_t,allowed_chars), NULL,
 	"@abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_: /"},
 
 	{ NULL, -1, 0, NULL, NULL }	/* end the list */
@@ -86,12 +83,12 @@ static char *allowed_chars = NULL;
  */
 static int sql_log_instantiate(CONF_SECTION *conf, void **instance)
 {
-	rlm_sql_log_t	*inst;
+	rlm_kafka_log_config_t	*inst;
 
         /*
          *      Set up a storage area for instance data.
          */
-        inst = calloc(1, sizeof(rlm_sql_log_t));
+        inst = calloc(1, sizeof(rlm_kafka_log_config_t));
         if (inst == NULL) {
                 radlog(L_ERR, "rlm_sql_log: Not enough memory");
                 return -1;
@@ -120,7 +117,7 @@ static int sql_log_detach(void *instance)
 {
 	int i;
 	char **p;
-	rlm_sql_log_t *inst = (rlm_sql_log_t *)instance;
+	rlm_kafka_log_config_t *inst = (rlm_kafka_log_config_t *)instance;
 
 	/*
 	 *	Free up dynamically allocated string pointers.
@@ -196,75 +193,10 @@ static size_t sql_escape_func(char *out, size_t outlen, const char *in)
 	return len;
 }
 
-static size_t sql_utf8_escape_func(char *out, size_t outlen, const char *in)
-{
-	int len = 0;
-	int utf8 = 0;
-
-	while (in[0]) {
-		/* 
-		 * Skip over UTF8 characters
-		 */
-		utf8 = fr_utf8_char((const uint8_t *)in);
-		if (utf8) {
-			if (outlen <= utf8) {
-				break;
-			}
-			while (utf8-- > 0) {
-				*out = *in;
-				out++;
-				in++;
-				outlen--;
-				len++;
-			}
-			continue;
-		}
-
-		/*
-		 *	Non-printable characters get replaced with their
-		 *	mime-encoded equivalents.
-		 */
-		if ((in[0] < 32) ||
-		    strchr(allowed_chars, *in) == NULL) {
-			/*
-			 *	Only 3 or less bytes available.
-			 */
-			if (outlen <= 3) {
-				break;
-			}
-
-			snprintf(out, outlen, "=%02X", (unsigned char) in[0]);
-			in++;
-			out += 3;
-			outlen -= 3;
-			len += 3;
-			continue;
-		}
-
-		/*
-		 *	Only one byte left.
-		 */
-		if (outlen <= 1) {
-			break;
-		}
-
-		/*
-		 *	Allowed character.
-		 */
-		*out = *in;
-		out++;
-		in++;
-		outlen--;
-		len++;
-	}
-	*out = '\0';
-	return len;
-}
-
 /*
  *	Add the 'SQL-User-Name' attribute to the packet.
  */
-static int sql_set_user(rlm_sql_log_t *inst, REQUEST *request, char *sqlusername, const char *username)
+static int sql_set_user(rlm_kafka_log_config_t *inst, REQUEST *request, char *sqlusername, const char *username)
 {
 	VALUE_PAIR *vp=NULL;
 	char tmpuser[MAX_STRING_LEN];
@@ -305,7 +237,7 @@ static int sql_set_user(rlm_sql_log_t *inst, REQUEST *request, char *sqlusername
 /*
  *	Replace %<whatever> in the query.
  */
-static int sql_xlat_query(rlm_sql_log_t *inst, REQUEST *request, const char *query, char *xlat_query, size_t len)
+static int sql_xlat_query(rlm_kafka_log_config_t *inst, REQUEST *request, const char *query, char *xlat_query, size_t len)
 {
 	char	sqlusername[MAX_STRING_LEN];
 
@@ -322,8 +254,7 @@ static int sql_xlat_query(rlm_sql_log_t *inst, REQUEST *request, const char *que
 
 	/* Expand variables in the query */
 	xlat_query[0] = '\0';
-	radius_xlat(xlat_query, len, query, request,
-		    inst->utf8 ? sql_utf8_escape_func : sql_escape_func);
+	radius_xlat(xlat_query, len, query, request, sql_escape_func);
 	if (xlat_query[0] == '\0') {
 		radlog_request(L_ERR, 0, request, "Couldn't xlat the query %s",
 		       query);
@@ -354,7 +285,7 @@ static int setlock(int fd)
 /*
  *	Write the line into file (with lock)
  */
-static int sql_log_write(rlm_sql_log_t *inst, REQUEST *request, const char *line)
+static int sql_log_write(rlm_kafka_log_config_t *inst, REQUEST *request, const char *line)
 {
 	int fd;
 	FILE *fp;
@@ -422,7 +353,7 @@ static int sql_log_accounting(void *instance, REQUEST *request)
 	int		ret;
 	char		querystr[MAX_QUERY_LEN];
 	const char	*cfquery;
-	rlm_sql_log_t	*inst = (rlm_sql_log_t *)instance;
+	rlm_kafka_log_config_t	*inst = (rlm_kafka_log_config_t *)instance;
 	VALUE_PAIR	*pair;
 	DICT_VALUE	*dval;
 	CONF_PAIR	*cp;
@@ -467,7 +398,7 @@ static int sql_log_postauth(void *instance, REQUEST *request)
 {
 	int		ret;
 	char		querystr[MAX_QUERY_LEN];
-	rlm_sql_log_t	*inst = (rlm_sql_log_t *)instance;
+	rlm_kafka_log_config_t	*inst = (rlm_kafka_log_config_t *)instance;
 
 	rad_assert(request != NULL);
 
