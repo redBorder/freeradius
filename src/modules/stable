@@ -41,5 +41,6 @@ rlm_sql
 rlm_sqlcounter
 rlm_sqlippool
 rlm_sql_log
+rlm_kafka
 rlm_unix
 rlm_wimax

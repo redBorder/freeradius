@@ -440,6 +440,8 @@ accounting {
 #	Acct-Type Status-Server {
 #
 #	}
+
+	kafka_log
 }
 
 
