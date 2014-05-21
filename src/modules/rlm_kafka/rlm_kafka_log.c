@@ -164,85 +164,72 @@ static char *packet2buffer(rlm_kafka_log_config_t *inst, const REQUEST *request)
 	size_t cursor = 0;
 	cursor += snprintf(buffer,BUFFER_SIZE - cursor,"{\"timestamp\":%lu,",time(NULL));
 	if ((packet->code > 0) && (packet->code < FR_MAX_PACKET_CODE))
-		cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"packet_type\":\"%s\"",fr_packet_codes[packet->code]);
+		cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"packet_type\":\"%s\",",fr_packet_codes[packet->code]);
 	else
-		cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"packet_type\":\"%d\"",packet->code);
+		cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"packet_type\":%d,",packet->code);
 
-	snprintf(buffer + cursor,BUFFER_SIZE - cursor, "}");
 
-	return buffer;
+	VALUE_PAIR src_vp, dst_vp;
+
+	memset(&src_vp, 0, sizeof(src_vp));
+	memset(&dst_vp, 0, sizeof(dst_vp));
+	src_vp.operator = dst_vp.operator = T_OP_EQ;
+
+	switch (packet->src_ipaddr.af) {
+	case AF_INET:
+		src_vp.name = "Packet-Src-IP-Address";
+		src_vp.type = PW_TYPE_IPADDR;
+		src_vp.attribute = PW_PACKET_SRC_IP_ADDRESS;
+		src_vp.vp_ipaddr = packet->src_ipaddr.ipaddr.ip4addr.s_addr;
+		dst_vp.name = "Packet-Dst-IP-Address";
+		dst_vp.type = PW_TYPE_IPADDR;
+		dst_vp.attribute = PW_PACKET_DST_IP_ADDRESS;
+		dst_vp.vp_ipaddr = packet->dst_ipaddr.ipaddr.ip4addr.s_addr;
+		break;
+	case AF_INET6:
+		src_vp.name = "Packet-Src-IPv6-Address";
+		src_vp.type = PW_TYPE_IPV6ADDR;
+		src_vp.attribute = PW_PACKET_SRC_IPV6_ADDRESS;
+		memcpy(src_vp.vp_strvalue,
+		       &packet->src_ipaddr.ipaddr.ip6addr,
+		       sizeof(packet->src_ipaddr.ipaddr.ip6addr));
+		dst_vp.name = "Packet-Dst-IPv6-Address";
+		dst_vp.type = PW_TYPE_IPV6ADDR;
+		dst_vp.attribute = PW_PACKET_DST_IPV6_ADDRESS;
+		memcpy(dst_vp.vp_strvalue,
+		       &packet->dst_ipaddr.ipaddr.ip6addr,
+		       sizeof(packet->dst_ipaddr.ipaddr.ip6addr));
+		break;
+	default:
+		break;
+	}
+
+	cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"%s\":\"",src_vp.name);
+	cursor += vp_prints_value(buffer+cursor, BUFFER_SIZE - cursor, &src_vp, 0 /* quote */);
+	cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\",");
+
+	cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"%s\":\"",dst_vp.name);
+	cursor += vp_prints_value(buffer+cursor, BUFFER_SIZE - cursor, &dst_vp, 0 /* quote */);
+	cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\",");
+
+	src_vp.name = "Packet-Src-IP-Port";
+	src_vp.attribute = PW_PACKET_SRC_PORT;
+	src_vp.type = PW_TYPE_INTEGER;
+	src_vp.vp_integer = packet->src_port;
+	dst_vp.name = "Packet-Dst-IP-Port";
+	dst_vp.attribute = PW_PACKET_DST_PORT;
+	dst_vp.type = PW_TYPE_INTEGER;
+	dst_vp.vp_integer = packet->dst_port;
+
+	cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"%s\":\"",src_vp.name);
+	cursor += vp_prints_value(buffer+cursor, BUFFER_SIZE - cursor, &src_vp, 0 /* quote */);
+	cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\",");
+
+	cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"%s\":\"",dst_vp.name);
+	cursor += vp_prints_value(buffer+cursor, BUFFER_SIZE - cursor, &dst_vp, 0 /* quote */);
+	cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"");
 
 	#if 0
-	
-	/*
-	 *	Write the information to the file.
-	 */
-	if (!compat) {
-		/*
-		 *	Print out names, if they're OK.
-		 *	Numbers, if not.
-		 */
-		if ((packet->code > 0) &&
-		    (packet->code < FR_MAX_PACKET_CODE)) {
-			fprintf(fp, "\tPacket-Type = %s\n",
-				fr_packet_codes[packet->code]);
-		} else {
-			fprintf(fp, "\tPacket-Type = %d\n", packet->code);
-		}
-	}
-
-	if (inst->log_srcdst) {
-		VALUE_PAIR src_vp, dst_vp;
-
-		memset(&src_vp, 0, sizeof(src_vp));
-		memset(&dst_vp, 0, sizeof(dst_vp));
-		src_vp.operator = dst_vp.operator = T_OP_EQ;
-
-		switch (packet->src_ipaddr.af) {
-		case AF_INET:
-			src_vp.name = "Packet-Src-IP-Address";
-			src_vp.type = PW_TYPE_IPADDR;
-			src_vp.attribute = PW_PACKET_SRC_IP_ADDRESS;
-			src_vp.vp_ipaddr = packet->src_ipaddr.ipaddr.ip4addr.s_addr;
-			dst_vp.name = "Packet-Dst-IP-Address";
-			dst_vp.type = PW_TYPE_IPADDR;
-			dst_vp.attribute = PW_PACKET_DST_IP_ADDRESS;
-			dst_vp.vp_ipaddr = packet->dst_ipaddr.ipaddr.ip4addr.s_addr;
-			break;
-		case AF_INET6:
-			src_vp.name = "Packet-Src-IPv6-Address";
-			src_vp.type = PW_TYPE_IPV6ADDR;
-			src_vp.attribute = PW_PACKET_SRC_IPV6_ADDRESS;
-			memcpy(src_vp.vp_strvalue,
-			       &packet->src_ipaddr.ipaddr.ip6addr,
-			       sizeof(packet->src_ipaddr.ipaddr.ip6addr));
-			dst_vp.name = "Packet-Dst-IPv6-Address";
-			dst_vp.type = PW_TYPE_IPV6ADDR;
-			dst_vp.attribute = PW_PACKET_DST_IPV6_ADDRESS;
-			memcpy(dst_vp.vp_strvalue,
-			       &packet->dst_ipaddr.ipaddr.ip6addr,
-			       sizeof(packet->dst_ipaddr.ipaddr.ip6addr));
-			break;
-		default:
-			break;
-		}
-
-		vp_print(fp, &src_vp);
-		vp_print(fp, &dst_vp);
-
-		src_vp.name = "Packet-Src-IP-Port";
-		src_vp.attribute = PW_PACKET_SRC_PORT;
-		src_vp.type = PW_TYPE_INTEGER;
-		src_vp.vp_integer = packet->src_port;
-		dst_vp.name = "Packet-Dst-IP-Port";
-		dst_vp.attribute = PW_PACKET_DST_PORT;
-		dst_vp.type = PW_TYPE_INTEGER;
-		dst_vp.vp_integer = packet->dst_port;
-
-		vp_print(fp, &src_vp);
-		vp_print(fp, &dst_vp);
-	}
-
 	/* Write each attribute/value to the log file */
 	for (pair = packet->vps; pair != NULL; pair = pair->next) {
 		DICT_ATTR da;
@@ -284,6 +271,9 @@ static char *packet2buffer(rlm_kafka_log_config_t *inst, const REQUEST *request)
 
 	fprintf(fp, "\n");
 	#endif
+
+	cursor += snprintf(buffer+cursor,BUFFER_SIZE - cursor,"}");
+	return buffer;
 }
 
 /*
