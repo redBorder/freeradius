@@ -152,13 +152,15 @@ static int kafka_log_produce(rlm_kafka_log_config_t *inst, REQUEST *request, con
 		return RLM_MODULE_FAIL;
 	}
 	#endif
-	RDEBUG("Producing kafka_log_accounting: %s",line);
+	printf("Producing kafka_log_accounting: %s\n",line);
 	return RLM_MODULE_OK;
 }
 
 static char *packet2buffer(rlm_kafka_log_config_t *inst, const REQUEST *request){
+	VALUE_PAIR	*pair;
+
 	const RADIUS_PACKET *packet = request->packet;
-#define BUFFER_SIZE 4096 // @TODO pass to 
+#define BUFFER_SIZE 40960 // @TODO pass to 
 
 	char *buffer = calloc(BUFFER_SIZE,sizeof(char));
 	size_t cursor = 0;
@@ -227,27 +229,24 @@ static char *packet2buffer(rlm_kafka_log_config_t *inst, const REQUEST *request)
 
 	cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"%s\":\"",dst_vp.name);
 	cursor += vp_prints_value(buffer+cursor, BUFFER_SIZE - cursor, &dst_vp, 0 /* quote */);
-	cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"");
+	if(packet->vps)
+		cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\",");
 
-	#if 0
 	/* Write each attribute/value to the log file */
+
 	for (pair = packet->vps; pair != NULL; pair = pair->next) {
-		DICT_ATTR da;
-		da.attr = pair->attribute;
-
-		if (inst->ht &&
-		    fr_hash_table_finddata(inst->ht, &da)) continue;
-
-		/*
-		 *	Don't print passwords in old format...
-		 */
-		if (compat && (pair->attribute == PW_USER_PASSWORD)) continue;
 
 		/*
 		 *	Print all of the attributes.
 		 */
-		vp_print(fp, pair);
+		cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"%s\":\"",pair->name);
+		cursor += vp_prints_value(buffer+cursor, BUFFER_SIZE - cursor, pair, 0 /* quote */);
+		cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"");
+		if(pair->next)
+			cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,",");
 	}
+	
+	#if 0
 
 	/*
 	 *	Add non-protocol attibutes.
