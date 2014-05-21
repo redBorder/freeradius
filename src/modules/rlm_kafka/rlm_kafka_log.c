@@ -245,31 +245,6 @@ static char *packet2buffer(rlm_kafka_log_config_t *inst, const REQUEST *request)
 		if(pair->next)
 			cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,",");
 	}
-	
-	#if 0
-
-	/*
-	 *	Add non-protocol attibutes.
-	 */
-	if (compat) {
-		if (request->proxy) {
-			char proxy_buffer[128];
-
-			inet_ntop(request->proxy->dst_ipaddr.af,
-				  &request->proxy->dst_ipaddr.ipaddr,
-				  proxy_buffer, sizeof(proxy_buffer));
-			fprintf(fp, "\tFreeradius-Proxied-To = %s\n",
-				proxy_buffer);
-			RDEBUG("Freeradius-Proxied-To = %s",
-				proxy_buffer);
-		}
-
-		fprintf(fp, "\tTimestamp = %ld\n",
-			(unsigned long) request->timestamp);
-	}
-
-	fprintf(fp, "\n");
-	#endif
 
 	cursor += snprintf(buffer+cursor,BUFFER_SIZE - cursor,"}");
 	return buffer;
