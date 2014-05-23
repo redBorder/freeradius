@@ -6,5 +6,6 @@
 
 TARGET      = rlm_kafka_log
 SRCS        = rlm_kafka_log.c
+RLM_LDFLAGS = -lrdkafka
 
 include ../rules.mak

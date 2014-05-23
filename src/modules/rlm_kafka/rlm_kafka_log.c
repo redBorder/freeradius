@@ -34,9 +34,15 @@ RCSID("$Id$")
 #include <fcntl.h>
 #include <sys/stat.h>
 
+#include <librdkafka/rdkafka.h>
+
 static int kafka_log_instantiate(CONF_SECTION *conf, void **instance);
 static int kafka_log_detach(void *instance);
 static int kafka_log_accounting(void *instance, REQUEST *request);
+
+#ifndef LOG_DEBUG
+#define LOG_DEBUG 7
+#endif
 
 #define MAX_QUERY_LEN 4096
 
@@ -44,9 +50,15 @@ static int kafka_log_accounting(void *instance, REQUEST *request);
  *	Define a structure for our module configuration.
  */
 typedef struct rlm_kafka_log_config_t {
-	char		*broker;
+	char		*brokers;
 	char		*topic;
 	int 		port;
+	int 		print_delivery;
+	char		*kafka_debug;
+
+	rd_kafka_t       *rk;
+	rd_kafka_topic_t *rkt;
+
 	CONF_SECTION	*conf_section;
 } rlm_kafka_log_config_t;
 
@@ -54,15 +66,92 @@ typedef struct rlm_kafka_log_config_t {
  *	A mapping of configuration file names to internal variables.
  */
 static const CONF_PARSER module_config[] = {
-	{"broker", PW_TYPE_STRING_PTR,
-	 offsetof(rlm_kafka_log_config_t,broker), NULL, "localhost"},
+	{"brokers", PW_TYPE_STRING_PTR,
+	 offsetof(rlm_kafka_log_config_t,brokers), NULL, "localhost"},
 	{"topic", PW_TYPE_STRING_PTR,
 	 offsetof(rlm_kafka_log_config_t,topic), NULL, NULL},
 	{"port", PW_TYPE_INTEGER,
-	 offsetof(rlm_kafka_log_config_t,port), NULL, NULL},
+	 offsetof(rlm_kafka_log_config_t,port), NULL, 0},
+	{"print_delivery", PW_TYPE_INTEGER,
+	 offsetof(rlm_kafka_log_config_t,print_delivery), NULL, 0},
+	{"kafka_debug", PW_TYPE_STRING_PTR,
+	 offsetof(rlm_kafka_log_config_t,kafka_debug), NULL, NULL},
 
 	{ NULL, -1, 0, NULL, NULL }	/* end the list */
 };
+
+static void msg_delivered (rd_kafka_t *rk,
+	void *payload, size_t len,
+	int error_code,
+	void *opaque, void *msg_opaque) {
+
+	rlm_kafka_log_config_t *inst = (rlm_kafka_log_config_t *)opaque;
+
+	if (error_code)
+		radlog(L_ERR, "%% Message delivery failed: %s\n",
+		rd_kafka_err2str(error_code));
+	else if (!inst->print_delivery)
+		radlog(L_INFO, "%% Message delivered (%zd bytes)\n", len);
+}
+
+static int kafka_log_instantiate_kafka(rlm_kafka_log_config_t *inst){
+	rd_kafka_conf_t *conf = rd_kafka_conf_new();
+	rd_kafka_topic_conf_t *topic_conf = rd_kafka_topic_conf_new();
+	char errstr[512];
+
+	if(!inst){
+		radlog(L_ERR, "rlm_kafka_log: inst not set in instantiate_kafka()");
+		kafka_log_detach(inst);
+		return -1;
+	}
+
+	if(!inst->brokers){
+		radlog(L_ERR, "rlm_kafka_log: Kafka broker not set");
+		kafka_log_detach(inst);
+		return -1;
+	}
+
+	if(!inst->topic){
+		radlog(L_ERR, "rlm_kafka_log: Kafka topic not set");
+		kafka_log_detach(inst);
+		return -1;
+	}
+
+	rd_kafka_conf_set_opaque (conf, inst);
+	rd_kafka_conf_set_dr_cb(conf, msg_delivered);
+
+	inst->rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
+	if(NULL == inst->rk) {
+		radlog(L_ERR, "rlm_kafka_log: Failed to create new producer: %s\n",errstr);
+		kafka_log_detach(inst);
+		return -1;
+	}
+
+	if (inst->kafka_debug){
+		// @TODO add debug callback. At the moment, it's enough with stderr.
+		rd_kafka_set_log_level(inst->rk, LOG_DEBUG);
+		const int rc = rd_kafka_conf_set(conf, "debug", inst->kafka_debug, errstr, sizeof(errstr));
+		if(rc != RD_KAFKA_CONF_OK){
+			radlog(L_ERR, "rlm_kafka_log: Debug configuration failed: %s: %s\n",errstr, inst->kafka_debug);
+			kafka_log_detach(inst);
+			return -1;
+		}
+	}
+
+	if (rd_kafka_brokers_add(inst->rk, inst->brokers) == 0) {
+		radlog(L_ERR, "rlm_kafka_log: No valid brokers specified\n");
+		kafka_log_detach(inst);
+		return -1;
+	}
+
+	inst->rkt = rd_kafka_topic_new(inst->rk, inst->topic, topic_conf);
+	if(NULL == inst->rkt){
+		radlog(L_ERR, "rlm_kafka_log: inst->rkt could not be created\n");
+		kafka_log_detach(inst);
+		return -1;
+	}
+
+}
 
 /*
  *	Do any per-module initialization that is separate to each
@@ -100,8 +189,22 @@ static int kafka_log_instantiate(CONF_SECTION *conf, void **instance)
 	inst->conf_section = conf;
 	*instance = inst;
 
+	const int krc = kafka_log_instantiate_kafka(inst);
+	if(krc<0)
+		return krc;
 
 	return 0;
+}
+
+static int wait_last_kafka_messages(rd_kafka_t *rk){
+	int outq_len = rd_kafka_outq_len(rk);
+	while (outq_len > 0){
+		rd_kafka_poll(rk, 100);
+		const int current_outq_len = rd_kafka_outq_len(rk);
+		if(outq_len == current_outq_len)
+			break; // Nothing to do
+		outq_len = current_outq_len;
+	}
 }
 
 /*
@@ -134,25 +237,57 @@ static int kafka_log_detach(void *instance)
 		free(*p);
 		*p = NULL;
 	}
+
+	wait_last_kafka_messages(inst->rk);
+	rd_kafka_destroy(inst->rk);
+	rd_kafka_wait_destroyed(2000);
 	free(inst);
 	return 0;
 }
 
 /*
  *	Write the line into kafka
+ *  Based on kaf
  */
 static int kafka_log_produce(rlm_kafka_log_config_t *inst, REQUEST *request, const char *line)
 {
+	int retried = 0;
+	const size_t msg_len = strlen(line);
 
-	/* ERROR EXAMPLE */
-	#if 0	
-	if ((fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0666)) < 0) {
-		radlog_request(L_ERR, 0, request, "Couldn't open file %s: %s",
-			       path, strerror(errno));
-		return RLM_MODULE_FAIL;
-	}
-	#endif
-	printf("Producing kafka_log_accounting: %s\n",line);
+    /* Produce message: keep trying until it succeeds. */
+    do {
+        rd_kafka_resp_err_t err;
+
+        if (rd_kafka_produce(inst->rkt, RD_KAFKA_PARTITION_UA, RD_KAFKA_MSG_F_FREE,
+                             line, msg_len, NULL, 0, NULL) != -1) {
+                break;
+        }
+
+        err = rd_kafka_errno2err(errno);
+
+        if (err != RD_KAFKA_RESP_ERR__QUEUE_FULL){
+			radlog(L_ERR, "rlm_kafka_log: Failed to produce message (%zd bytes): %s",
+                      msg_len, rd_kafka_err2str(err));
+			return RLM_MODULE_FAIL;
+		}
+
+		if(retried){
+			radlog(L_ERR, "rlm_kafka_log: Failed to produce message (%zd bytes): %s",
+                      msg_len, rd_kafka_err2str(err));
+			return RLM_MODULE_FAIL;
+		}
+
+        retried++;
+
+        /* Internal queue full, sleep to allow
+         * messages to be produced/time out
+         * before trying again. */
+        rd_kafka_poll(inst->rk, 5);
+    } while (1 && !retried);
+
+    /* Poll for delivery reports, errors, etc. */
+    rd_kafka_poll(inst->rk, 0);
+
 	return RLM_MODULE_OK;
 }
 
@@ -292,7 +427,6 @@ static int kafka_log_accounting(void *instance, REQUEST *request)
 	char *kafka_buffer = packet2buffer(inst,request);
 	if(kafka_buffer){
 		kafka_log_produce(inst,request,kafka_buffer);
-		free(kafka_buffer);
 	}
 
 	/* Xlat the query */
