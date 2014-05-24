@@ -196,7 +196,7 @@ static int kafka_log_instantiate(CONF_SECTION *conf, void **instance)
 	return 0;
 }
 
-static int wait_last_kafka_messages(rd_kafka_t *rk){
+static void wait_last_kafka_messages(rd_kafka_t *rk){
 	int outq_len = rd_kafka_outq_len(rk);
 	while (outq_len > 0){
 		rd_kafka_poll(rk, 100);
@@ -291,6 +291,29 @@ static int kafka_log_produce(rlm_kafka_log_config_t *inst, REQUEST *request, con
 	return RLM_MODULE_OK;
 }
 
+// Escape strcpy escaping characters:
+//  \ -> \\
+
+static size_t escaped_strlcpy(char *buffer,const char *src,const ssize_t buf_len){
+    char *cursor = buffer;
+
+	while(cursor-buffer < buf_len+3 && *src != '\0'){
+		switch(*cursor){
+		case '\'':
+			*(cursor++) = '\\';
+			*(cursor++) = '\\';
+			src++;
+			break;
+		default:
+			*cursor++ = *src++;
+			break;
+		};
+	}
+
+	*cursor = '\0';
+	return cursor-buffer;
+}
+
 static char *packet2buffer(rlm_kafka_log_config_t *inst, const REQUEST *request){
 	VALUE_PAIR	*pair;
 
@@ -376,7 +399,7 @@ static char *packet2buffer(rlm_kafka_log_config_t *inst, const REQUEST *request)
 		 */
 		cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"%s\":\"",pair->name);
 		cursor += vp_prints_value(buffer+cursor, BUFFER_SIZE - cursor, pair, 0 /* quote */);
-		cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"");
+		cursor += escaped_strlcpy(buffer + cursor,"\"",BUFFER_SIZE - cursor);
 		if(pair->next)
 			cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,",");
 	}
