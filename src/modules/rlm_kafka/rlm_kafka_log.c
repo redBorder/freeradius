@@ -52,6 +52,7 @@ static int kafka_log_accounting(void *instance, REQUEST *request);
 typedef struct rlm_kafka_log_config_t {
 	char		*brokers;
 	char		*topic;
+	char        *rdkafka_opts;
 	int 		port;
 	int 		print_delivery;
 	char		*kafka_debug;
@@ -74,8 +75,8 @@ static const CONF_PARSER module_config[] = {
 	 offsetof(rlm_kafka_log_config_t,port), NULL, 0},
 	{"print_delivery", PW_TYPE_INTEGER,
 	 offsetof(rlm_kafka_log_config_t,print_delivery), NULL, 0},
-	{"kafka_debug", PW_TYPE_STRING_PTR,
-	 offsetof(rlm_kafka_log_config_t,kafka_debug), NULL, NULL},
+	{"rdkafka_opts", PW_TYPE_STRING_PTR,
+	 offsetof(rlm_kafka_log_config_t,rdkafka_opts), NULL, NULL},
 
 	{ NULL, -1, 0, NULL, NULL }	/* end the list */
 };
@@ -94,8 +95,55 @@ static void msg_delivered (rd_kafka_t *rk,
 		radlog(L_INFO, "%% Message delivered (%zd bytes)\n", len);
 }
 
-static int kafka_log_instantiate_kafka(rlm_kafka_log_config_t *inst){
-	rd_kafka_conf_t *conf = rd_kafka_conf_new();
+/* Extracted from Magnus Edenhill's kafkacat */
+static rd_kafka_conf_res_t rdkafka_add_attr_to_config(rd_kafka_conf_t *rk_conf,
+				rd_kafka_topic_conf_t *topic_conf,const char *name,const char *val,char *errstr,size_t errstr_size){
+	if (!strcmp(name, "list") ||
+	    !strcmp(name, "help")) {
+		rd_kafka_conf_properties_show(stdout);
+		exit(0);
+	}
+
+	rd_kafka_conf_res_t res = RD_KAFKA_CONF_UNKNOWN;
+	/* Try "topic." prefixed properties on topic
+	 * conf first, and then fall through to global if
+	 * it didnt match a topic configuration property. */
+	if (!strncmp(name, "topic.", strlen("topic.")))
+		res = rd_kafka_topic_conf_set(topic_conf,
+					      name+strlen("topic."),
+					      val,errstr,errstr_size);
+
+	if (res == RD_KAFKA_CONF_UNKNOWN)
+		res = rd_kafka_conf_set(rk_conf, name, val,
+					errstr, errstr_size);
+
+    return res;
+}
+
+static int cf_section_rdkafka_parse(const CONF_SECTION *section, 
+						rd_kafka_conf_t *rk_conf,rd_kafka_topic_conf_t *rkt_conf,
+						char *err,size_t errsize){
+	const CONF_PAIR *pair = cf_pair_find(section, NULL);
+
+	while(pair){
+		if(!strncmp(cf_pair_attr(pair),"rdkafka.",strlen("rdkafka."))){
+			const char *key = cf_pair_attr(pair);
+			const char *val = cf_pair_value(pair);
+
+			if(strlen(key) > strlen("rdkafka.")){
+				key = key + strlen("rdkafka,");
+				const rd_kafka_conf_res_t rc = 
+					rdkafka_add_attr_to_config(rk_conf,rkt_conf,key,val,err,errsize);
+				if(rc != RD_KAFKA_CONF_OK)
+					return rc;
+			}
+		}
+		pair = cf_pair_find_next(section,pair,NULL);
+	} 
+}
+
+static int kafka_log_instantiate_kafka(CONF_SECTION *conf, rlm_kafka_log_config_t *inst){
+	rd_kafka_conf_t *kafka_conf = rd_kafka_conf_new();
 	rd_kafka_topic_conf_t *topic_conf = rd_kafka_topic_conf_new();
 	char errstr[512];
 
@@ -117,10 +165,17 @@ static int kafka_log_instantiate_kafka(rlm_kafka_log_config_t *inst){
 		return -1;
 	}
 
-	rd_kafka_conf_set_opaque (conf, inst);
-	rd_kafka_conf_set_dr_cb(conf, msg_delivered);
+	rd_kafka_conf_set_opaque (kafka_conf, inst);
+	rd_kafka_conf_set_dr_cb(kafka_conf, msg_delivered);
 
-	inst->rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
+	const int rc = cf_section_rdkafka_parse(conf,&kafka_conf,&topic_conf,errstr,sizeof(errstr));
+	if(rc != RD_KAFKA_CONF_OK){
+        radlog(L_ERR,"rlm_kafka_log: Failed to add librdkafka config: %s", errstr);
+        kafka_log_detach(inst);
+        return -1;
+	}
+
+	inst->rk = rd_kafka_new(RD_KAFKA_PRODUCER, kafka_conf, errstr, sizeof(errstr));
 	if(NULL == inst->rk) {
 		radlog(L_ERR, "rlm_kafka_log: Failed to create new producer: %s\n",errstr);
 		kafka_log_detach(inst);
@@ -130,7 +185,7 @@ static int kafka_log_instantiate_kafka(rlm_kafka_log_config_t *inst){
 	if (inst->kafka_debug){
 		// @TODO add debug callback. At the moment, it's enough with stderr.
 		rd_kafka_set_log_level(inst->rk, LOG_DEBUG);
-		const int rc = rd_kafka_conf_set(conf, "debug", inst->kafka_debug, errstr, sizeof(errstr));
+		const int rc = rd_kafka_conf_set(kafka_conf, "debug", inst->kafka_debug, errstr, sizeof(errstr));
 		if(rc != RD_KAFKA_CONF_OK){
 			radlog(L_ERR, "rlm_kafka_log: Debug configuration failed: %s: %s\n",errstr, inst->kafka_debug);
 			kafka_log_detach(inst);
@@ -190,7 +245,7 @@ static int kafka_log_instantiate(CONF_SECTION *conf, void **instance)
 	inst->conf_section = conf;
 	*instance = inst;
 
-	const int krc = kafka_log_instantiate_kafka(inst);
+	const int krc = kafka_log_instantiate_kafka(conf,inst);
 	if(krc<0)
 		return krc;
 
@@ -239,10 +294,14 @@ static int kafka_log_detach(void *instance)
 		*p = NULL;
 	}
 
-	wait_last_kafka_messages(inst->rk);
-	rd_kafka_destroy(inst->rk);
-	rd_kafka_wait_destroyed(2000);
-	free(inst);
+	if(inst){
+		if(inst->rk){
+			wait_last_kafka_messages(inst->rk);
+			rd_kafka_destroy(inst->rk);
+			rd_kafka_wait_destroyed(2000);
+		}
+		free(inst);
+	}
 	return 0;
 }
 
