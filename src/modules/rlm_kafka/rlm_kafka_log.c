@@ -151,6 +151,7 @@ static int kafka_log_instantiate_kafka(rlm_kafka_log_config_t *inst){
 		return -1;
 	}
 
+	return 0;
 }
 
 /*
@@ -291,6 +292,7 @@ static int kafka_log_produce(rlm_kafka_log_config_t *inst, REQUEST *request, con
 	return RLM_MODULE_OK;
 }
 
+#if 0
 // Escape strcpy escaping characters:
 //  \ -> \\
 
@@ -313,6 +315,7 @@ static size_t escaped_strlcpy(char *buffer,const char *src,const ssize_t buf_len
 	*cursor = '\0';
 	return cursor-buffer;
 }
+#endif
 
 static char *packet2buffer(rlm_kafka_log_config_t *inst, const REQUEST *request){
 	VALUE_PAIR	*pair;
@@ -393,13 +396,15 @@ static char *packet2buffer(rlm_kafka_log_config_t *inst, const REQUEST *request)
 	/* Write each attribute/value to the log file */
 
 	for (pair = packet->vps; pair != NULL; pair = pair->next) {
+		char value_buf[1024];
 
 		/*
 		 *	Print all of the attributes.
 		 */
 		cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"%s\":\"",pair->name);
-		cursor += vp_prints_value(buffer+cursor, BUFFER_SIZE - cursor, pair, 0 /* quote */);
-		cursor += escaped_strlcpy(buffer + cursor,"\"",BUFFER_SIZE - cursor);
+		const size_t value_buf_len = vp_prints_value(value_buf, 1024, pair, 0 /* quote */);
+		cursor += fr_print_string(value_buf,value_buf_len,buffer+cursor,BUFFER_SIZE - cursor);
+		cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"");
 		if(pair->next)
 			cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,",");
 	}
