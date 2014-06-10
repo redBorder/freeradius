@@ -57,7 +57,6 @@ typedef struct rlm_kafka_log_config_t {
 	char        *rdkafka_opts;
 	int 		port;
 	int 		print_delivery;
-	char		*kafka_debug;
 
 	rd_kafka_t       *rk;
 	rd_kafka_topic_t *rkt;
@@ -184,17 +183,6 @@ static int kafka_log_instantiate_kafka(CONF_SECTION *conf, rlm_kafka_log_config_
 		radlog(L_ERR, "rlm_kafka_log: Failed to create new producer: %s\n",errstr);
 		kafka_log_detach(inst);
 		return -1;
-	}
-
-	if (inst->kafka_debug){
-		// @TODO add debug callback. At the moment, it's enough with stderr.
-		rd_kafka_set_log_level(inst->rk, LOG_DEBUG);
-		const int rc_set = rd_kafka_conf_set(kafka_conf, "debug", inst->kafka_debug, errstr, sizeof(errstr));
-		if(rc_set != RD_KAFKA_CONF_OK){
-			radlog(L_ERR, "rlm_kafka_log: Debug configuration failed: %s: %s\n",errstr, inst->kafka_debug);
-			kafka_log_detach(inst);
-			return -1;
-		}
 	}
 
 	if (rd_kafka_brokers_add(inst->rk, inst->brokers) == 0) {
