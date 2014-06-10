@@ -141,7 +141,9 @@ static int cf_section_rdkafka_parse(CONF_SECTION *section,
 			}
 		}
 		pair = cf_pair_find_next(section,pair,NULL);
-	} 
+	}
+
+	return RD_KAFKA_CONF_OK;
 }
 
 static int kafka_log_instantiate_kafka(CONF_SECTION *conf, rlm_kafka_log_config_t *inst){
@@ -311,7 +313,7 @@ static int kafka_log_detach(void *instance)
  *	Write the line into kafka
  *  Based on kaf
  */
-static int kafka_log_produce(rlm_kafka_log_config_t *inst, REQUEST *request, const char *line)
+static int kafka_log_produce(rlm_kafka_log_config_t *inst, char *line)
 {
 	int retried = 0;
 	const size_t msg_len = strlen(line);
@@ -319,10 +321,10 @@ static int kafka_log_produce(rlm_kafka_log_config_t *inst, REQUEST *request, con
     /* Produce message: keep trying until it succeeds. */
     do {
         rd_kafka_resp_err_t err;
-
-        if (rd_kafka_produce(inst->rkt, RD_KAFKA_PARTITION_UA, RD_KAFKA_MSG_F_FREE,
-                             (void *)line, msg_len, NULL, 0, NULL) != -1) {
-                break;
+        const int rc = rd_kafka_produce(inst->rkt, RD_KAFKA_PARTITION_UA, RD_KAFKA_MSG_F_FREE,
+                             (void *)line, msg_len, NULL, 0, NULL);
+        if(rc != -1) {
+            break;
         }
 
         err = rd_kafka_errno2err(errno);
@@ -345,7 +347,7 @@ static int kafka_log_produce(rlm_kafka_log_config_t *inst, REQUEST *request, con
          * messages to be produced/time out
          * before trying again. */
         rd_kafka_poll(inst->rk, 5);
-    } while (1 && !retried);
+    } while (!retried);
 
     /* Poll for delivery reports, errors, etc. */
     rd_kafka_poll(inst->rk, 0);
@@ -354,9 +356,9 @@ static int kafka_log_produce(rlm_kafka_log_config_t *inst, REQUEST *request, con
 }
 
 #if 0
-// Escape strcpy escaping characters:
-//  \ -> \\
-
+/* Escape strcpy escaping characters:
+ *  \ -> \\
+ */
 static size_t escaped_strlcpy(char *buffer,const char *src,const ssize_t buf_len){
     char *cursor = buffer;
 
@@ -378,7 +380,7 @@ static size_t escaped_strlcpy(char *buffer,const char *src,const ssize_t buf_len
 }
 #endif
 
-static char *packet2buffer(rlm_kafka_log_config_t *inst, const REQUEST *request){
+static char *packet2buffer(const REQUEST *request){
 	VALUE_PAIR	*pair;
 
 	const RADIUS_PACKET *packet = request->packet;
@@ -479,13 +481,9 @@ static char *packet2buffer(rlm_kafka_log_config_t *inst, const REQUEST *request)
  */
 static int kafka_log_accounting(void *instance, REQUEST *request)
 {
-	int		ret;
-	char		querystr[MAX_QUERY_LEN];
-	const char	*cfquery;
 	rlm_kafka_log_config_t	*inst = (rlm_kafka_log_config_t *)instance;
 	VALUE_PAIR	*pair;
 	DICT_VALUE	*dval;
-	CONF_PAIR	*cp;
 
 	rad_assert(request != NULL);
 	rad_assert(request->packet != NULL);
@@ -505,28 +503,45 @@ static int kafka_log_accounting(void *instance, REQUEST *request)
 		return RLM_MODULE_NOOP;
 	}
 
-	/*
-	if ((cp = cf_pair_find(inst->conf_section, dval->name)) == NULL) {
-		RDEBUG("Couldn't find an entry %s in the config section",
-		       dval->name);
+	char *kafka_buffer = packet2buffer(request);
+	if(kafka_buffer){
+		kafka_log_produce(inst,kafka_buffer);
+		return RLM_MODULE_OK;
+	}else{
 		return RLM_MODULE_NOOP;
 	}
-	*/
+}
 
-	char *kafka_buffer = packet2buffer(inst,request);
-	if(kafka_buffer){
-		kafka_log_produce(inst,request,kafka_buffer);
+static int kafka_log_post_proxy(void *instance, REQUEST *request){
+	rlm_kafka_log_config_t	*inst = (rlm_kafka_log_config_t *)instance;
+	VALUE_PAIR	*pair;
+	DICT_VALUE	*dval;
+
+	rad_assert(request != NULL);
+	rad_assert(request->packet != NULL);
+
+	RDEBUG("Processing kafka_log_post_proxy");
+
+	/* Find the Acct Status Type. */
+	if ((pair = pairfind(request->packet->vps, PW_POST_PROXY_TYPE)) == NULL) {
+		radlog_request(L_ERR, 0, request, "Packet has no post-proxy type");
+		return RLM_MODULE_INVALID;
 	}
 
-	/* Xlat the query */
-	#if 0
-	ret = sql_xlat_query(inst, request, cfquery, querystr, sizeof(querystr));
-	if (ret != RLM_MODULE_OK)
-		return ret;
+	/* Search the query in conf section of the module */
+	if ((dval = dict_valbyattr(PW_POST_PROXY_TYPE, pair->vp_integer)) == NULL) {
+		radlog_request(L_ERR, 0, request, "Unsupported Post-Proxy-Type = %d",
+			       pair->vp_integer);
+		return RLM_MODULE_NOOP;
+	}
 
-	return kafka_log_produce(inst, request, querystr);
-	#endif
-	return RLM_MODULE_OK;
+	char *kafka_buffer = packet2buffer(request);
+	if(kafka_buffer){
+		kafka_log_produce(inst,kafka_buffer);
+		return RLM_MODULE_OK;
+	}else{
+		return RLM_MODULE_NOOP;
+	}
 }
 
 /*
@@ -551,7 +566,7 @@ module_t rlm_kafka_log = {
 		kafka_log_accounting,	/* accounting */
 		NULL,			/* checksimul */
 		NULL,			/* pre-proxy */
-		NULL,			/* post-proxy */
+		kafka_log_post_proxy,	/* post-proxy */
 		NULL			/* post-auth */
 	},
 };
