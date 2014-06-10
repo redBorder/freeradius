@@ -187,8 +187,8 @@ static int kafka_log_instantiate_kafka(CONF_SECTION *conf, rlm_kafka_log_config_
 	if (inst->kafka_debug){
 		// @TODO add debug callback. At the moment, it's enough with stderr.
 		rd_kafka_set_log_level(inst->rk, LOG_DEBUG);
-		const int rc = rd_kafka_conf_set(kafka_conf, "debug", inst->kafka_debug, errstr, sizeof(errstr));
-		if(rc != RD_KAFKA_CONF_OK){
+		const int rc_set = rd_kafka_conf_set(kafka_conf, "debug", inst->kafka_debug, errstr, sizeof(errstr));
+		if(rc_set != RD_KAFKA_CONF_OK){
 			radlog(L_ERR, "rlm_kafka_log: Debug configuration failed: %s: %s\n",errstr, inst->kafka_debug);
 			kafka_log_detach(inst);
 			return -1;
@@ -321,7 +321,7 @@ static int kafka_log_produce(rlm_kafka_log_config_t *inst, REQUEST *request, con
         rd_kafka_resp_err_t err;
 
         if (rd_kafka_produce(inst->rkt, RD_KAFKA_PARTITION_UA, RD_KAFKA_MSG_F_FREE,
-                             line, msg_len, NULL, 0, NULL) != -1) {
+                             (void *)line, msg_len, NULL, 0, NULL) != -1) {
                 break;
         }
 
