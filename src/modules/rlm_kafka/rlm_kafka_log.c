@@ -36,6 +36,8 @@ RCSID("$Id$")
 
 #include <librdkafka/rdkafka.h>
 
+#define RB_UNUSED __attribute__((unused))
+
 static int kafka_log_instantiate(CONF_SECTION *conf, void **instance);
 static int kafka_log_detach(void *instance);
 static int kafka_log_accounting(void *instance, REQUEST *request);
@@ -81,10 +83,10 @@ static const CONF_PARSER module_config[] = {
 	{ NULL, -1, 0, NULL, NULL }	/* end the list */
 };
 
-static void msg_delivered (rd_kafka_t *rk,
-	void *payload, size_t len,
+static void msg_delivered (rd_kafka_t *rk RB_UNUSED,
+	void *payload RB_UNUSED, size_t len,
 	int error_code,
-	void *opaque, void *msg_opaque) {
+	void *opaque, void *msg_opaque RB_UNUSED) {
 
 	rlm_kafka_log_config_t *inst = (rlm_kafka_log_config_t *)opaque;
 
