@@ -122,10 +122,10 @@ static rd_kafka_conf_res_t rdkafka_add_attr_to_config(rd_kafka_conf_t *rk_conf,
     return res;
 }
 
-static int cf_section_rdkafka_parse(const CONF_SECTION *section, 
+static int cf_section_rdkafka_parse(CONF_SECTION *section, 
 						rd_kafka_conf_t *rk_conf,rd_kafka_topic_conf_t *rkt_conf,
 						char *err,size_t errsize){
-	const CONF_PAIR *pair = cf_pair_find(section, NULL);
+	CONF_PAIR *pair = cf_pair_find(section, NULL);
 
 	while(pair){
 		if(!strncmp(cf_pair_attr(pair),"rdkafka.",strlen("rdkafka."))){
@@ -170,7 +170,7 @@ static int kafka_log_instantiate_kafka(CONF_SECTION *conf, rlm_kafka_log_config_
 	rd_kafka_conf_set_opaque (kafka_conf, inst);
 	rd_kafka_conf_set_dr_cb(kafka_conf, msg_delivered);
 
-	const int rc = cf_section_rdkafka_parse(conf,&kafka_conf,&topic_conf,errstr,sizeof(errstr));
+	const int rc = cf_section_rdkafka_parse(conf,kafka_conf,topic_conf,errstr,sizeof(errstr));
 	if(rc != RD_KAFKA_CONF_OK){
         radlog(L_ERR,"rlm_kafka_log: Failed to add librdkafka config: %s", errstr);
         kafka_log_detach(inst);
