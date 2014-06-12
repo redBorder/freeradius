@@ -511,17 +511,21 @@ static int kafka_log_post_proxy(void *instance, REQUEST *request){
 	RDEBUG("Processing kafka_log_post_proxy");
 
 	/* Find the Acct Status Type. */
+	/*
 	if ((pair = pairfind(request->packet->vps, PW_POST_PROXY_TYPE)) == NULL) {
 		radlog_request(L_ERR, 0, request, "Packet has no post-proxy type");
 		return RLM_MODULE_INVALID;
 	}
+	*/
 
 	/* Search the query in conf section of the module */
+	/*
 	if ((dval = dict_valbyattr(PW_POST_PROXY_TYPE, pair->vp_integer)) == NULL) {
 		radlog_request(L_ERR, 0, request, "Unsupported Post-Proxy-Type = %d",
 			       pair->vp_integer);
 		return RLM_MODULE_NOOP;
 	}
+	*/
 
 	char *kafka_buffer = packet2buffer(request);
 	if(kafka_buffer){
