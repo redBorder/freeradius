@@ -1,0 +1,59 @@
+rlm_kafka installation and running guide
+by Eugenio Perez <eupm90@gmail.com>
+Copyright 2014 Eneo Tecnologia S.L.
+
+Radius Kafka module
+
+0. INTRODUCTION
+
+  rlm_kafka uses Magnus Edenhill's librdkafka to send, currently, accounting 
+  and post-proxy information to a kafka topic in json format. It's easily 
+  extensible to send a kafka message for each plugin entry point.
+
+1. WHAT DOES IT DO
+
+  It creates a json object that contains all value-pair of all packets that
+  comes to the accounting and post-proxy section. After that, it send the json
+  object to a kafka topic.
+
+2. HOW TO USE IT
+  
+  You have to install librdkafka and rbutils from:
+
+    * https://github.com/edenhill/librdkafka
+    * https://github.com/redBorder/rbutils
+
+  After that, change kafka_log.conf according to your needs. It should look 
+  like:
+
+  kafka_log {
+    brokers                         = "localhost"
+    port                            = 9092 # default
+    topic                           = "rb_radius"
+    rdkafka.socket.keepalive.enable = "true"
+    rdkafka.socket.max.fails        = "3"
+  }
+
+  And be sure that it's $INCLUDEd under the "modules {}" section of radiusd.conf 
+  file.
+
+  Note: More options are defined under section 3: MODULE OPTIONS.
+
+  Then put "kafka_log" under "post-proxy {}" or "accounting {}" section under 
+  sites-enabled/default (Or the virtual host you want to use).
+
+  Proxy or accounting listening freeradius configuration is out of this
+  document's scope.
+
+3.  MODULE OPTIONS
+
+  brokers    => A comma sepparated list of brokers to use.
+  topic      => Kafka topic to write to.
+  port       => Port where broker is listening (default is 9092).
+  rdkafka.*  => Option to pass directly to librdkafka
+
+4. Bug reports:
+    
+  Please use the github issues system. If you prefer, you can send me an 
+  email to eugenio@redborder.org
+
