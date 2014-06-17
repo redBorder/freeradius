@@ -35,8 +35,10 @@ RCSID("$Id$")
 #include <sys/stat.h>
 
 #include <librdkafka/rdkafka.h>
+#include <librbutils/rbstring.h>
 
 #define RB_UNUSED __attribute__((unused))
+#define MAX_INT_STRING_SIZE sizeof("18.446.744.073.709.551.616") // 2^64;
 
 static int kafka_log_instantiate(CONF_SECTION *conf, void **instance);
 static int kafka_log_detach(void *instance);
@@ -299,33 +301,29 @@ static int kafka_log_detach(void *instance)
 
 /*
  *	Write the line into kafka
- *  Based on kaf
+ *  Based on kafkacat produce() function.
  */
-static int kafka_log_produce(rlm_kafka_log_config_t *inst, char *line)
+static int kafka_log_produce(rlm_kafka_log_config_t *inst, strbuffer_t *buffer)
 {
+	const size_t  line_len = strbuffer_length(buffer);
+	char   *line     = strbuffer_steal_value(buffer);
 	int retried = 0;
-	const size_t msg_len = strlen(line);
 
     /* Produce message: keep trying until it succeeds. */
     do {
         rd_kafka_resp_err_t err;
         const int rc = rd_kafka_produce(inst->rkt, RD_KAFKA_PARTITION_UA, RD_KAFKA_MSG_F_FREE,
-                             (void *)line, msg_len, NULL, 0, NULL);
+                             (void *)line, line_len, NULL, 0, NULL);
         if(rc != -1) {
             break;
         }
 
         err = rd_kafka_errno2err(errno);
 
-        if (err != RD_KAFKA_RESP_ERR__QUEUE_FULL){
+        if (err != RD_KAFKA_RESP_ERR__QUEUE_FULL || retried){
 			radlog(L_ERR, "rlm_kafka_log: Failed to produce message (%zd bytes): %s",
-                      msg_len, rd_kafka_err2str(err));
-			return RLM_MODULE_FAIL;
-		}
-
-		if(retried){
-			radlog(L_ERR, "rlm_kafka_log: Failed to produce message (%zd bytes): %s",
-                      msg_len, rd_kafka_err2str(err));
+                      line_len, rd_kafka_err2str(err));
+			strbuffer_close(buffer);
 			return RLM_MODULE_FAIL;
 		}
 
@@ -336,6 +334,8 @@ static int kafka_log_produce(rlm_kafka_log_config_t *inst, char *line)
          * before trying again. */
         rd_kafka_poll(inst->rk, 5);
     } while (!retried);
+
+    free(buffer);
 
     /* Poll for delivery reports, errors, etc. */
     rd_kafka_poll(inst->rk, 0);
@@ -368,20 +368,76 @@ static size_t escaped_strlcpy(char *buffer,const char *src,const ssize_t buf_len
 }
 #endif
 
-static char *packet2buffer(const REQUEST *request){
+// Function: C++ version 0.4 char* style "itoa", Written by Lukás Chmela. (Modified)
+static char* _itoa(int64_t value, char* result, int base, size_t bufsize) {
+    // check that the base if valid
+    if (base < 2 || base > 36) { *result = '\0'; return result; }
+
+    char *ptr = result+bufsize;
+    int64_t tmp_value;
+
+    *--ptr = '\0';
+    do {
+        tmp_value = value;
+        value /= base;
+        *--ptr = "zyxwvutsrqponmlkjihgfedcba9876543210123456789abcdefghijklmnopqrstuvwxyz" [35 + (tmp_value - value * base)];
+    } while ( value );
+
+
+    if (tmp_value < 0) *--ptr = '-';
+    return ptr;
+}
+
+static void strbuffer_append_timestamp(strbuffer_t *strbuff,time_t timestamp){
+	char buffer[MAX_INT_STRING_SIZE]; /* 2^64 */
+	const char *timestamp_str = _itoa(timestamp,buffer,10,sizeof(buffer));
+	
+	strbuffer_append(strbuff,"\"timestamp\":");
+	strbuffer_append(strbuff,timestamp_str);
+}
+
+static void strbuffer_append_packet_type(strbuffer_t *strbuff,const RADIUS_PACKET *packet){
+	strbuffer_append(strbuff,"\"packet_type\":");
+	if ((packet->code > 0) && (packet->code < FR_MAX_PACKET_CODE)){
+		strbuffer_append(strbuff,"\"");
+		strbuffer_append(strbuff,fr_packet_codes[packet->code]);
+		strbuffer_append(strbuff,"\"");
+	}else{
+		char buffer[MAX_INT_STRING_SIZE];
+		const char *packet_code = _itoa(packet->code,buffer,10,sizeof(buffer));
+		strbuffer_append(strbuff,packet_code);
+	}
+}
+
+/* return: 1 if data added. 0 IOC */
+static int strbuffer_append_value_pair(strbuffer_t *strbuff,VALUE_PAIR *pair){
+	char buffer[1024];
+	const size_t buffer_len = vp_prints_value(buffer, sizeof(buffer), pair, 0 /* quote */);
+
+	if(buffer_len>0){
+		strbuffer_append(strbuff,",");
+		strbuffer_append(strbuff,"\"");
+		strbuffer_append(strbuff,pair->name);
+		strbuffer_append(strbuff,"\":\"");
+
+		strbuffer_append_escaped_bytes(strbuff,buffer,buffer_len,"\"");
+		strbuffer_append(strbuff,"\"");
+		return 1;
+	}
+	return 0;	
+}
+
+static strbuffer_t *packet2buffer(const REQUEST *request){
+	const RADIUS_PACKET *packet = request->packet;
 	VALUE_PAIR	*pair;
 
-	const RADIUS_PACKET *packet = request->packet;
-#define BUFFER_SIZE 40960 // @TODO pass to 
+	strbuffer_t *buffer = malloc(sizeof(*buffer));
+	strbuffer_init(buffer);
 
-	char *buffer = calloc(BUFFER_SIZE,sizeof(char));
-	size_t cursor = 0;
-	cursor += snprintf(buffer,BUFFER_SIZE - cursor,"{\"timestamp\":%lu,",time(NULL));
-	if ((packet->code > 0) && (packet->code < FR_MAX_PACKET_CODE))
-		cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"packet_type\":\"%s\",",fr_packet_codes[packet->code]);
-	else
-		cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"packet_type\":%d,",packet->code);
-
+	strbuffer_append(buffer,"{");
+	strbuffer_append_timestamp(buffer,time(NULL));
+	strbuffer_append(buffer,",");
+	strbuffer_append_packet_type(buffer,packet);
 
 	VALUE_PAIR src_vp, dst_vp;
 
@@ -418,13 +474,8 @@ static char *packet2buffer(const REQUEST *request){
 		break;
 	}
 
-	cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"%s\":\"",src_vp.name);
-	cursor += vp_prints_value(buffer+cursor, BUFFER_SIZE - cursor, &src_vp, 0 /* quote */);
-	cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\",");
-
-	cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"%s\":\"",dst_vp.name);
-	cursor += vp_prints_value(buffer+cursor, BUFFER_SIZE - cursor, &dst_vp, 0 /* quote */);
-	cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\",");
+	strbuffer_append_value_pair(buffer,&src_vp);
+	strbuffer_append_value_pair(buffer,&dst_vp);
 
 	src_vp.name = "Packet-Src-IP-Port";
 	src_vp.attribute = PW_PACKET_SRC_PORT;
@@ -435,32 +486,15 @@ static char *packet2buffer(const REQUEST *request){
 	dst_vp.type = PW_TYPE_INTEGER;
 	dst_vp.vp_integer = packet->dst_port;
 
-	cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"%s\":\"",src_vp.name);
-	cursor += vp_prints_value(buffer+cursor, BUFFER_SIZE - cursor, &src_vp, 0 /* quote */);
-	cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\",");
+	strbuffer_append_value_pair(buffer,&src_vp);
+	strbuffer_append_value_pair(buffer,&dst_vp);
 
-	cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"%s\":\"",dst_vp.name);
-	cursor += vp_prints_value(buffer+cursor, BUFFER_SIZE - cursor, &dst_vp, 0 /* quote */);
-	if(packet->vps)
-		cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\",");
-
-	/* Write each attribute/value to the log file */
-
+	/* Write each attribute/value to the buffer */
 	for (pair = packet->vps; pair != NULL; pair = pair->next) {
-		char value_buf[1024];
-
-		/*
-		 *	Print all of the attributes.
-		 */
-		cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"%s\":\"",pair->name);
-		const size_t value_buf_len = vp_prints_value(value_buf, 1024, pair, 0 /* quote */);
-		cursor += fr_print_string(value_buf,value_buf_len,buffer+cursor,BUFFER_SIZE - cursor);
-		cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,"\"");
-		if(pair->next)
-			cursor += snprintf(buffer + cursor,BUFFER_SIZE - cursor,",");
+		strbuffer_append_value_pair(buffer,pair);
 	}
 
-	cursor += snprintf(buffer+cursor,BUFFER_SIZE - cursor,"}");
+	strbuffer_append(buffer,"}");
 	return buffer;
 }
 
@@ -491,10 +525,9 @@ static int kafka_log_accounting(void *instance, REQUEST *request)
 		return RLM_MODULE_NOOP;
 	}
 
-	char *kafka_buffer = packet2buffer(request);
-	if(kafka_buffer){
-		kafka_log_produce(inst,kafka_buffer);
-		return RLM_MODULE_OK;
+	strbuffer_t *json_buffer = packet2buffer(request);
+	if(json_buffer){
+		return kafka_log_produce(inst,json_buffer);
 	}else{
 		return RLM_MODULE_NOOP;
 	}
@@ -502,8 +535,6 @@ static int kafka_log_accounting(void *instance, REQUEST *request)
 
 static int kafka_log_post_proxy(void *instance, REQUEST *request){
 	rlm_kafka_log_config_t	*inst = (rlm_kafka_log_config_t *)instance;
-	VALUE_PAIR	*pair;
-	DICT_VALUE	*dval;
 
 	rad_assert(request != NULL);
 	rad_assert(request->packet != NULL);
@@ -527,9 +558,9 @@ static int kafka_log_post_proxy(void *instance, REQUEST *request){
 	}
 	*/
 
-	char *kafka_buffer = packet2buffer(request);
-	if(kafka_buffer){
-		kafka_log_produce(inst,kafka_buffer);
+	strbuffer_t *json_buffer = packet2buffer(request);
+	if(json_buffer){
+		kafka_log_produce(inst,json_buffer);
 		return RLM_MODULE_OK;
 	}else{
 		return RLM_MODULE_NOOP;
