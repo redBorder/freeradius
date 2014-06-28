@@ -420,7 +420,7 @@ static int strbuffer_append_value_pair(strbuffer_t *strbuff,VALUE_PAIR *pair){
 		strbuffer_append(strbuff,pair->name);
 		strbuffer_append(strbuff,"\":\"");
 
-		strbuffer_append_escaped_bytes(strbuff,buffer,buffer_len,"\"");
+		strbuffer_append_escaped_bytes(strbuff,buffer,buffer_len,"\\\"");
 		strbuffer_append(strbuff,"\"");
 		return 1;
 	}
