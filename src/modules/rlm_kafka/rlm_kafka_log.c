@@ -578,7 +578,7 @@ static int kafka_log_post_proxy(void *instance, REQUEST *request){
  */
 module_t rlm_kafka_log = {
 	RLM_MODULE_INIT,
-	"sql_log",
+	"kafka_log",
 	RLM_TYPE_CHECK_CONFIG_SAFE | RLM_TYPE_HUP_SAFE,		/* type */
 	kafka_log_instantiate,		/* instantiation */
 	kafka_log_detach,			/* detach */
