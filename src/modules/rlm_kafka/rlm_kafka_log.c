@@ -39,6 +39,7 @@ RCSID("$Id$")
 
 #define RB_UNUSED __attribute__((unused))
 #define MAX_INT_STRING_SIZE sizeof("18.446.744.073.709.551.616") // 2^64;
+static const char *MAC_RADIUS_KEY = "Calling-Station-Id";
 
 static int kafka_log_instantiate(CONF_SECTION *conf, void **instance);
 static int kafka_log_detach(void *instance);
@@ -102,6 +103,55 @@ static void msg_delivered (rd_kafka_t *rk RB_UNUSED,
 		rd_kafka_err2str(error_code));
 	else if (!inst->print_delivery)
 		radlog(L_INFO, "%% Message delivered (%zd bytes)\n", len);
+}
+
+static int32_t mac_partitioner (const rd_kafka_topic_t *rkt,
+		const void *keydata,size_t keylen,int32_t partition_cnt,
+		void *rkt_opaque,void *msg_opaque) {
+	size_t toks=0;
+	uint64_t intmac = 0;
+	char mac_key[sizeof("00:00:00:00:00:00")];
+
+	if(keylen != strlen("00:00:00:00:00:00")) {
+		radlog(L_ERR,"Invalid mac %.*s len",(int)keylen,(const char *)keydata);
+		goto fallback_behavior;
+	}
+
+	mac_key[0]='\0';
+	strncat(mac_key,(const char *)keydata,sizeof(mac_key)-1);
+
+	for(toks=1;toks<6;++toks) {
+		const size_t semicolon_pos = 3*toks-1;
+		if(':' != mac_key[semicolon_pos]) {
+			radlog(L_INFO,"Invalid mac %.*s (it does not have ':' in char %zu.",
+				(int)keylen,mac_key,semicolon_pos);
+			goto fallback_behavior;
+		}
+	}
+
+	for(toks=0;toks<6;++toks) {
+		char *endptr = NULL;
+		intmac = (intmac<<8) + strtoul(&mac_key[3*toks],&endptr,16);
+		/// The key should end with '"' in json format
+		if((toks < 5 && *endptr != ':') || (toks==5 && *endptr!='\0')) {
+			radlog(L_INFO,"Invalid mac %.*s, unexpected %c end of %zu token",
+				(int)keylen,mac_key,*endptr,toks);
+			goto fallback_behavior;
+
+		}
+
+		if(endptr != mac_key + 3*(toks+1)-1) {
+			radlog(L_INFO,"Invalid mac %.*s, unexpected token length at %zu token",
+				(int)keylen,mac_key,toks);
+			goto fallback_behavior;
+		}
+	}
+
+	return intmac % (uint32_t)partition_cnt;
+
+fallback_behavior:
+	return rd_kafka_msg_partitioner_random(rkt,keydata,keylen,partition_cnt,
+		rkt_opaque,msg_opaque);
 }
 
 /* Extracted from Magnus Edenhill's kafkacat */
@@ -178,6 +228,7 @@ static int kafka_log_instantiate_kafka(CONF_SECTION *conf, rlm_kafka_log_config_
 
 	rd_kafka_conf_set_opaque (kafka_conf, inst);
 	rd_kafka_conf_set_dr_cb(kafka_conf, msg_delivered);
+	rd_kafka_topic_conf_set_partitioner_cb(topic_conf, mac_partitioner);
 
 	const int rc = cf_section_rdkafka_parse(conf,kafka_conf,topic_conf,errstr,sizeof(errstr));
 	if(rc != RD_KAFKA_CONF_OK){
@@ -353,7 +404,8 @@ static int kafka_log_detach(void *instance)
  *	Write the line into kafka
  *  Based on kafkacat produce() function.
  */
-static int kafka_log_produce(rlm_kafka_log_config_t *inst, strbuffer_t *buffer)
+static int kafka_log_produce(rlm_kafka_log_config_t *inst, strbuffer_t *buffer,
+	const char *mac)
 {
 	const size_t  line_len = strbuffer_length(buffer);
 	char   *line     = strbuffer_steal_value(buffer);
@@ -363,7 +415,7 @@ static int kafka_log_produce(rlm_kafka_log_config_t *inst, strbuffer_t *buffer)
     do {
         rd_kafka_resp_err_t err;
         const int rc = rd_kafka_produce(inst->rkt, RD_KAFKA_PARTITION_UA, RD_KAFKA_MSG_F_FREE,
-                             (void *)line, line_len, NULL, 0, NULL);
+                             (void *)line, line_len, mac, strlen("00:00:00:00:00:00"), NULL);
         if(rc != -1) {
             break;
         }
@@ -478,7 +530,7 @@ static int strbuffer_append_value_pair(strbuffer_t *strbuff,VALUE_PAIR *pair){
 }
 
 static strbuffer_t *packet2buffer(const REQUEST *request,const char *enrichment,
-			size_t enrichment_len){
+			size_t enrichment_len,const char **mac){
 	const RADIUS_PACKET *packet = request->packet;
 	VALUE_PAIR	*pair;
 
@@ -542,7 +594,14 @@ static strbuffer_t *packet2buffer(const REQUEST *request,const char *enrichment,
 
 	/* Write each attribute/value to the buffer */
 	for (pair = packet->vps; pair != NULL; pair = pair->next) {
+		if(0==strcmp(pair->name,MAC_RADIUS_KEY)) {
+			/* Setting mac in msg as key */
+			*mac = strbuffer_value(buffer) + strbuffer_length(buffer) +
+				strlen(",\"\":") + strlen(MAC_RADIUS_KEY);
+		}
+
 		strbuffer_append_value_pair(buffer,pair);
+
 	}
 
 	/* Write enrichment data */
@@ -582,10 +641,11 @@ static int kafka_log_accounting(void *instance, REQUEST *request)
 		return RLM_MODULE_NOOP;
 	}
 
+	const char *mac = NULL;
 	strbuffer_t *json_buffer = packet2buffer(request,inst->enrichment_post,
-		inst->enrichment_post_len);
+		inst->enrichment_post_len,&mac);
 	if(json_buffer){
-		return kafka_log_produce(inst,json_buffer);
+		return kafka_log_produce(inst,json_buffer,mac);
 	}else{
 		return RLM_MODULE_NOOP;
 	}
@@ -616,10 +676,11 @@ static int kafka_log_post_proxy(void *instance, REQUEST *request){
 	}
 	*/
 
+	const char *mac = NULL;
 	strbuffer_t *json_buffer = packet2buffer(request,inst->enrichment_post,
-		inst->enrichment_post_len);
+		inst->enrichment_post_len,&mac);
 	if(json_buffer){
-		kafka_log_produce(inst,json_buffer);
+		kafka_log_produce(inst,json_buffer,mac);
 		return RLM_MODULE_OK;
 	}else{
 		return RLM_MODULE_NOOP;
