@@ -60,6 +60,10 @@ typedef struct rlm_kafka_log_config_t {
 	int 		port;
 	int 		print_delivery;
 
+	const char *enrichment_pre;
+	char *enrichment_post;
+	size_t enrichment_post_len;
+
 	rd_kafka_t       *rk;
 	rd_kafka_topic_t *rkt;
 
@@ -80,6 +84,8 @@ static const CONF_PARSER module_config[] = {
 	 offsetof(rlm_kafka_log_config_t,print_delivery), NULL, 0},
 	{"rdkafka_opts", PW_TYPE_STRING_PTR,
 	 offsetof(rlm_kafka_log_config_t,rdkafka_opts), NULL, NULL},
+	{"enrichment", PW_TYPE_STRING_PTR,
+	 offsetof(rlm_kafka_log_config_t,enrichment_pre), NULL, NULL},
 
 	{ NULL, -1, 0, NULL, NULL }	/* end the list */
 };
@@ -203,6 +209,42 @@ static int kafka_log_instantiate_kafka(CONF_SECTION *conf, rlm_kafka_log_config_
 	return 0;
 }
 
+static char *heap_snprinf(size_t *size,const char *fmt,...) {
+	va_list args;
+
+	va_start (args, fmt);
+	const ssize_t needed_size = vsnprintf (NULL,0,fmt, args);
+	if(needed_size < 0) {
+		char errbuf[BUFSIZ];
+		strerror_r(errno,errbuf,sizeof(errbuf));
+		radlog(L_ERR, "rlm_kafka_log: Couldn't parse format string: %s",
+			errbuf);
+		return NULL;
+	}
+	va_end (args);
+
+	char *ret = calloc(1,needed_size+1);
+	if(NULL == ret) {
+		radlog(L_ERR, "rlm_kafka_log: Can't allocate string (out of memory?)");
+		return NULL;
+	}
+
+	va_start (args, fmt);
+	const ssize_t printf_rc = vsprintf (ret,fmt, args);
+	if(printf_rc < 0) {
+		char errbuf[BUFSIZ];
+		strerror_r(errno,errbuf,sizeof(errbuf));
+		radlog(L_ERR, "rlm_kafka_log: Couldn't print format string: %s",
+			errbuf);
+		return NULL;
+	}
+	va_end (args);
+
+	*size = needed_size;
+
+	return ret;
+}
+
 /*
  *	Do any per-module initialization that is separate to each
  *	configured instance of the module.  e.g. set up connections
@@ -234,6 +276,11 @@ static int kafka_log_instantiate(CONF_SECTION *conf, void **instance)
 		radlog(L_ERR, "rlm_kafka_log: Unable to parse parameters");
 		kafka_log_detach(inst);
 		return -1;
+	}
+
+	if(inst->enrichment_pre) {
+		inst->enrichment_post = heap_snprinf(&inst->enrichment_post_len,",\"enrichment\":%s",
+			inst->enrichment_pre);
 	}
 
 	inst->conf_section = conf;
@@ -293,6 +340,9 @@ static int kafka_log_detach(void *instance)
 			wait_last_kafka_messages(inst->rk);
 			rd_kafka_destroy(inst->rk);
 			rd_kafka_wait_destroyed(2000);
+		}
+		if(inst->enrichment_post) {
+			free(inst->enrichment_post);
 		}
 		free(inst);
 	}
@@ -427,7 +477,8 @@ static int strbuffer_append_value_pair(strbuffer_t *strbuff,VALUE_PAIR *pair){
 	return 0;	
 }
 
-static strbuffer_t *packet2buffer(const REQUEST *request){
+static strbuffer_t *packet2buffer(const REQUEST *request,const char *enrichment,
+			size_t enrichment_len){
 	const RADIUS_PACKET *packet = request->packet;
 	VALUE_PAIR	*pair;
 
@@ -494,6 +545,12 @@ static strbuffer_t *packet2buffer(const REQUEST *request){
 		strbuffer_append_value_pair(buffer,pair);
 	}
 
+	/* Write enrichment data */
+	if(enrichment) {
+		strbuffer_append_bytes(buffer,enrichment,enrichment_len);
+	}
+
+
 	strbuffer_append(buffer,"}");
 	return buffer;
 }
@@ -525,7 +582,8 @@ static int kafka_log_accounting(void *instance, REQUEST *request)
 		return RLM_MODULE_NOOP;
 	}
 
-	strbuffer_t *json_buffer = packet2buffer(request);
+	strbuffer_t *json_buffer = packet2buffer(request,inst->enrichment_post,
+		inst->enrichment_post_len);
 	if(json_buffer){
 		return kafka_log_produce(inst,json_buffer);
 	}else{
@@ -558,7 +616,8 @@ static int kafka_log_post_proxy(void *instance, REQUEST *request){
 	}
 	*/
 
-	strbuffer_t *json_buffer = packet2buffer(request);
+	strbuffer_t *json_buffer = packet2buffer(request,inst->enrichment_post,
+		inst->enrichment_post_len);
 	if(json_buffer){
 		kafka_log_produce(inst,json_buffer);
 		return RLM_MODULE_OK;
