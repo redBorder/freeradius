@@ -61,10 +61,6 @@ typedef struct rlm_kafka_log_config_t {
 	int 		port;
 	int 		print_delivery;
 
-	const char *enrichment_pre;
-	char *enrichment_post;
-	size_t enrichment_post_len;
-
 	rd_kafka_t       *rk;
 	rd_kafka_topic_t *rkt;
 
@@ -85,8 +81,6 @@ static const CONF_PARSER module_config[] = {
 	 offsetof(rlm_kafka_log_config_t,print_delivery), NULL, 0},
 	{"rdkafka_opts", PW_TYPE_STRING_PTR,
 	 offsetof(rlm_kafka_log_config_t,rdkafka_opts), NULL, NULL},
-	{"enrichment", PW_TYPE_STRING_PTR,
-	 offsetof(rlm_kafka_log_config_t,enrichment_pre), NULL, NULL},
 
 	{ NULL, -1, 0, NULL, NULL }	/* end the list */
 };
@@ -260,6 +254,7 @@ static int kafka_log_instantiate_kafka(CONF_SECTION *conf, rlm_kafka_log_config_
 	return 0;
 }
 
+#if 0
 static char *heap_snprinf(size_t *size,const char *fmt,...) {
 	va_list args;
 
@@ -295,6 +290,7 @@ static char *heap_snprinf(size_t *size,const char *fmt,...) {
 
 	return ret;
 }
+#endif
 
 /*
  *	Do any per-module initialization that is separate to each
@@ -327,11 +323,6 @@ static int kafka_log_instantiate(CONF_SECTION *conf, void **instance)
 		radlog(L_ERR, "rlm_kafka_log: Unable to parse parameters");
 		kafka_log_detach(inst);
 		return -1;
-	}
-
-	if(inst->enrichment_pre) {
-		inst->enrichment_post = heap_snprinf(&inst->enrichment_post_len,",\"enrichment\":%s",
-			inst->enrichment_pre);
 	}
 
 	inst->conf_section = conf;
@@ -391,9 +382,6 @@ static int kafka_log_detach(void *instance)
 			wait_last_kafka_messages(inst->rk);
 			rd_kafka_destroy(inst->rk);
 			rd_kafka_wait_destroyed(2000);
-		}
-		if(inst->enrichment_post) {
-			free(inst->enrichment_post);
 		}
 		free(inst);
 	}
@@ -642,8 +630,7 @@ static int kafka_log_accounting(void *instance, REQUEST *request)
 	}
 
 	const char *mac = NULL;
-	strbuffer_t *json_buffer = packet2buffer(request,inst->enrichment_post,
-		inst->enrichment_post_len,&mac);
+	strbuffer_t *json_buffer = packet2buffer(request,NULL,0,&mac);
 	if(json_buffer){
 		return kafka_log_produce(inst,json_buffer,mac);
 	}else{
@@ -677,8 +664,7 @@ static int kafka_log_post_proxy(void *instance, REQUEST *request){
 	*/
 
 	const char *mac = NULL;
-	strbuffer_t *json_buffer = packet2buffer(request,inst->enrichment_post,
-		inst->enrichment_post_len,&mac);
+	strbuffer_t *json_buffer = packet2buffer(request,NULL,0,&mac);
 	if(json_buffer){
 		kafka_log_produce(inst,json_buffer,mac);
 		return RLM_MODULE_OK;
