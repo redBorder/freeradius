@@ -5,7 +5,7 @@
 #
 
 TARGET      = rlm_kafka_log
-SRCS        = rlm_kafka_log.c
+SRCS        = rlm_kafka_log.c rlm_client_enrichment.c
 RLM_LDFLAGS = -lrdkafka -lrbutils
 
 include ../rules.mak

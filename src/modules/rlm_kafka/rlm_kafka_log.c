@@ -34,6 +34,8 @@ RCSID("$Id$")
 #include <fcntl.h>
 #include <sys/stat.h>
 
+#include "rlm_client_enrichment.h"
+
 #include <librdkafka/rdkafka.h>
 #include <librbutils/rbstring.h>
 
@@ -60,6 +62,8 @@ typedef struct rlm_kafka_log_config_t {
 	char        *rdkafka_opts;
 	int 		port;
 	int 		print_delivery;
+
+	client_enrichment_db_t *client_enrichment_db;
 
 	rd_kafka_t       *rk;
 	rd_kafka_topic_t *rkt;
@@ -198,6 +202,31 @@ static int cf_section_rdkafka_parse(CONF_SECTION *section,
 	return RD_KAFKA_CONF_OK;
 }
 
+static int cf_client_enrichment_db_add(client_enrichment_db_t *db,const char *key,const char *val){
+	return client_enrichment_db_add(db,key,val);
+}
+
+/// @TODO join with cf_section_rdkafka_parse
+static int cf_section_enrichment_parse(CONF_SECTION *section, client_enrichment_db_t *db){
+	static const char *config_prefix = "enrichment.";
+	CONF_PAIR *pair = cf_pair_find(section, NULL);
+
+	while(pair){
+		if(!strncmp(cf_pair_attr(pair),config_prefix,strlen(config_prefix))){
+			const char *key = cf_pair_attr(pair);
+			const char *val = cf_pair_value(pair);
+
+			if(strlen(key) > strlen(config_prefix)){
+				key = key + strlen(config_prefix);
+				cf_client_enrichment_db_add(db,key,val);
+			}
+		}
+		pair = cf_pair_find_next(section,pair,NULL);
+	}
+
+	return RD_KAFKA_CONF_OK;
+}
+
 static int kafka_log_instantiate_kafka(CONF_SECTION *conf, rlm_kafka_log_config_t *inst){
 	rd_kafka_conf_t *kafka_conf = rd_kafka_conf_new();
 	rd_kafka_topic_conf_t *topic_conf = rd_kafka_topic_conf_new();
@@ -255,44 +284,6 @@ static int kafka_log_instantiate_kafka(CONF_SECTION *conf, rlm_kafka_log_config_
 	return 0;
 }
 
-#if 0
-static char *heap_snprinf(size_t *size,const char *fmt,...) {
-	va_list args;
-
-	va_start (args, fmt);
-	const ssize_t needed_size = vsnprintf (NULL,0,fmt, args);
-	if(needed_size < 0) {
-		char errbuf[BUFSIZ];
-		strerror_r(errno,errbuf,sizeof(errbuf));
-		radlog(L_ERR, "rlm_kafka_log: Couldn't parse format string: %s",
-			errbuf);
-		return NULL;
-	}
-	va_end (args);
-
-	char *ret = calloc(1,needed_size+1);
-	if(NULL == ret) {
-		radlog(L_ERR, "rlm_kafka_log: Can't allocate string (out of memory?)");
-		return NULL;
-	}
-
-	va_start (args, fmt);
-	const ssize_t printf_rc = vsprintf (ret,fmt, args);
-	if(printf_rc < 0) {
-		char errbuf[BUFSIZ];
-		strerror_r(errno,errbuf,sizeof(errbuf));
-		radlog(L_ERR, "rlm_kafka_log: Couldn't print format string: %s",
-			errbuf);
-		return NULL;
-	}
-	va_end (args);
-
-	*size = needed_size;
-
-	return ret;
-}
-#endif
-
 /*
  *	Do any per-module initialization that is separate to each
  *	configured instance of the module.  e.g. set up connections
@@ -325,6 +316,15 @@ static int kafka_log_instantiate(CONF_SECTION *conf, void **instance)
 		kafka_log_detach(inst);
 		return -1;
 	}
+
+	inst->client_enrichment_db = client_enrichment_db_new();
+	if (NULL == inst->client_enrichment_db) {
+		radlog(L_ERR, "rlm_kafka_log: Unable to allocate client enrichment db");
+		kafka_log_detach(inst);
+		return -1;
+	}
+
+	cf_section_enrichment_parse(conf,inst->client_enrichment_db);
 
 	inst->conf_section = conf;
 	*instance = inst;
@@ -385,6 +385,10 @@ static int kafka_log_detach(void *instance)
 			rd_kafka_wait_destroyed(2000);
 		}
 		free(inst);
+
+		if(inst->client_enrichment_db){
+			client_enrichment_db_free(inst->client_enrichment_db);
+		}
 	}
 	return 0;
 }
@@ -631,7 +635,10 @@ static int kafka_log_accounting(void *instance, REQUEST *request)
 	}
 
 	const char *mac = NULL;
-	strbuffer_t *json_buffer = packet2buffer(request,NULL,0,&mac);
+	const char *enrichment = client_enrichment_db_get(inst->client_enrichment_db,
+		request->client->shortname);
+	size_t enrichment_len = enrichment?strlen(enrichment):0;
+	strbuffer_t *json_buffer = packet2buffer(request,enrichment,enrichment_len,&mac);
 	if(json_buffer){
 		return kafka_log_produce(inst,json_buffer,mac);
 	}else{
