@@ -586,7 +586,7 @@ static strbuffer_t *packet2buffer(const REQUEST *request,const char *enrichment,
 		if(0==strcmp(pair->name,MAC_RADIUS_KEY)) {
 			/* Setting mac in msg as key */
 			*mac = strbuffer_value(buffer) + strbuffer_length(buffer) +
-				strlen(",\"\":") + strlen(MAC_RADIUS_KEY);
+				strlen(",\"\":\"") + strlen(MAC_RADIUS_KEY);
 		}
 
 		strbuffer_append_value_pair(buffer,pair);
