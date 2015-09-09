@@ -176,15 +176,16 @@ static rd_kafka_conf_res_t rdkafka_add_attr_to_config(rd_kafka_conf_t *rk_conf,
 static int cf_section_rdkafka_parse(CONF_SECTION *section, 
 						rd_kafka_conf_t *rk_conf,rd_kafka_topic_conf_t *rkt_conf,
 						char *err,size_t errsize){
+	static const char *config_prefix = "rdkafka.";
 	CONF_PAIR *pair = cf_pair_find(section, NULL);
 
 	while(pair){
-		if(!strncmp(cf_pair_attr(pair),"rdkafka.",strlen("rdkafka."))){
+		if(!strncmp(cf_pair_attr(pair),config_prefix,strlen(config_prefix))){
 			const char *key = cf_pair_attr(pair);
 			const char *val = cf_pair_value(pair);
 
-			if(strlen(key) > strlen("rdkafka.")){
-				key = key + strlen("rdkafka,");
+			if(strlen(key) > strlen(config_prefix)){
+				key = key + strlen(config_prefix);
 				const rd_kafka_conf_res_t rc = 
 					rdkafka_add_attr_to_config(rk_conf,rkt_conf,key,val,err,errsize);
 				if(rc != RD_KAFKA_CONF_OK)
