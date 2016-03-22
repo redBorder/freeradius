@@ -33,6 +33,9 @@ RCSID("$Id$")
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <assert.h>
+#include <ctype.h>
+#include <limits.h>
 
 #include "rlm_client_enrichment.h"
 
@@ -103,53 +106,128 @@ static void msg_delivered (rd_kafka_t *rk RB_UNUSED,
 		radlog(L_INFO, "%% Message delivered (%zd bytes)\n", len);
 }
 
+static int validate_mac_separator(int iter,size_t pos,
+	size_t toks, char sep) {
+
+	if(toks == 6 && iter < 5) {
+		/* 00:00:00:00:00:00 or 00-00-00-00-00-00 */
+		return pos % 3 != 0 && (sep == '-' || sep == ':');
+	} else if (toks == 2 && iter == 0) {
+		/* 000000-000000 */
+		return pos == strlen("000000") && sep == '-';
+	} else {
+		return -1;
+	}
+}
+
+static int64_t colon_hypen_mac_partitioner0(const void *const_keydata,
+	size_t keylen, size_t toks) {
+	/* Partition mac like 00:00:00:00:00:00 or 00-00-00-00-00-00 */
+	char keydata[sizeof "00:00:00:00:00:00"];
+	int64_t ret = 0;
+	size_t i=0;
+	char *endptr = keydata;
+
+	assert(toks==6 || toks==2);
+	memcpy(keydata,const_keydata,sizeof(keydata)-1);
+	keydata[sizeof(keydata)-1] = '\0';
+
+	for(i=0;i<toks;i++) {
+		ret <<= (toks == 6 ? 8 : 24);
+		const char *prev_endptr = endptr;
+		ret += strtoul(endptr,&endptr,16);
+
+		if (NULL == endptr) {
+			radlog(L_ERR,"Invalid mac %.*s",(int)keylen,
+				(const char *)keydata);
+			return -1;
+		} else if (toks == 6 && endptr - prev_endptr != 2) {
+			radlog(L_ERR,
+				"Invalid mac %.*s, tok %zu is not 2 char length",
+				(int)keylen,(const char *)keydata,i);
+			return -1;
+		} else if (toks == 2 && endptr - prev_endptr != 6) {
+			radlog(L_ERR,
+				"Invalid mac %.*s, tok %zu is not 6 char length",
+				(int)keylen,(const char *)keydata,i);
+			return -1;
+		} else if (!validate_mac_separator(i,endptr - keydata,toks,
+								*endptr)) {
+			radlog(L_ERR,
+				"Invalid mac %.*s, it does not have ':' or '-' separator in pos %zu",
+				(int)keylen,(const char *)keydata,i);
+			return -1;
+		} else if (i == toks - 1
+				       && endptr - keydata != (signed)keylen) {
+			radlog(L_ERR,
+				"Invalid mac %.*s, last token is too short",
+				(int)keylen,(const char *)keydata);
+			return -1;
+		}
+
+		endptr += strlen(":");
+	}
+
+	return ret;
+}
+
+static int64_t number_mac_partitioner(const void *const_keydata,
+							       size_t keylen) {
+	/* Partition mac like 000000000000 */
+	char keydata[sizeof "000000000000"];
+	char *endptr = NULL;
+
+	memcpy(keydata,const_keydata,sizeof(keydata) - 1);
+	keydata[sizeof(keydata) - 1] = '\0';
+
+	if(!isdigit(((const char *)keydata)[0])) {
+		radlog(L_ERR,"Mac %.*s does not start with number",
+				(int)keylen,(const char *)keydata);
+		return -1;
+	}
+
+	const int64_t ret = strtoull(keydata,&endptr,16);
+
+	if(endptr != keydata + keylen) {
+		radlog(L_ERR,"Invalid mac %.*s, token is too short",
+				(int)keylen,(const char *)keydata);
+		return -1;
+	}
+
+	return ret;
+}
+
+static int64_t mac_partitioner0 (const void *keydata,size_t keylen) {
+	switch(keylen) {
+		/* case strlen(00-00-00-00-00-00): */
+		case strlen("00:00:00:00:00:00"):
+			return colon_hypen_mac_partitioner0(keydata,keylen,
+								6 /*toks */);
+
+		case strlen("000000-000000"):
+			return colon_hypen_mac_partitioner0(keydata,keylen,
+								2 /*toks */);
+
+		case strlen("000000000000"):
+			return number_mac_partitioner(keydata,keylen);
+
+		default:
+			radlog(L_ERR,"Invalid mac %.*s len",(int)keylen,
+							(const char *)keydata);
+			return -1;
+	};
+}
+
 static int32_t mac_partitioner (const rd_kafka_topic_t *rkt,
 		const void *keydata,size_t keylen,int32_t partition_cnt,
 		void *rkt_opaque,void *msg_opaque) {
-	size_t toks=0;
-	uint64_t intmac = 0;
-	char mac_key[sizeof("00:00:00:00:00:00")];
-
-	if(keylen != strlen("00:00:00:00:00:00")) {
-		radlog(L_ERR,"Invalid mac %.*s len",(int)keylen,(const char *)keydata);
-		goto fallback_behavior;
+	const int partition_id = mac_partitioner0(keydata,keylen);
+	if (partition_id < 0) {
+		return rd_kafka_msg_partitioner_random(rkt,keydata,keylen,
+			partition_cnt,rkt_opaque,msg_opaque);
+	} else {
+		return partition_id % partition_cnt;
 	}
-
-	mac_key[0]='\0';
-	strncat(mac_key,(const char *)keydata,sizeof(mac_key)-1);
-
-	for(toks=1;toks<6;++toks) {
-		const size_t semicolon_pos = 3*toks-1;
-		if(':' != mac_key[semicolon_pos]) {
-			radlog(L_INFO,"Invalid mac %.*s (it does not have ':' in char %zu.",
-				(int)keylen,mac_key,semicolon_pos);
-			goto fallback_behavior;
-		}
-	}
-
-	for(toks=0;toks<6;++toks) {
-		char *endptr = NULL;
-		intmac = (intmac<<8) + strtoul(&mac_key[3*toks],&endptr,16);
-		/// The key should end with '"' in json format
-		if((toks < 5 && *endptr != ':') || (toks==5 && *endptr!='\0')) {
-			radlog(L_INFO,"Invalid mac %.*s, unexpected %c end of %zu token",
-				(int)keylen,mac_key,*endptr,toks);
-			goto fallback_behavior;
-
-		}
-
-		if(endptr != mac_key + 3*(toks+1)-1) {
-			radlog(L_INFO,"Invalid mac %.*s, unexpected token length at %zu token",
-				(int)keylen,mac_key,toks);
-			goto fallback_behavior;
-		}
-	}
-
-	return intmac % (uint32_t)partition_cnt;
-
-fallback_behavior:
-	return rd_kafka_msg_partitioner_random(rkt,keydata,keylen,partition_cnt,
-		rkt_opaque,msg_opaque);
 }
 
 /* Extracted from Magnus Edenhill's kafkacat */
@@ -398,7 +476,7 @@ static int kafka_log_detach(void *instance)
  *  Based on kafkacat produce() function.
  */
 static int kafka_log_produce(rlm_kafka_log_config_t *inst, strbuffer_t *buffer,
-	const char *mac)
+	const char *mac, size_t mac_len)
 {
 	const size_t  line_len = strbuffer_length(buffer);
 	char   *line     = strbuffer_steal_value(buffer);
@@ -407,8 +485,9 @@ static int kafka_log_produce(rlm_kafka_log_config_t *inst, strbuffer_t *buffer,
     /* Produce message: keep trying until it succeeds. */
     do {
         rd_kafka_resp_err_t err;
-        const int rc = rd_kafka_produce(inst->rkt, RD_KAFKA_PARTITION_UA, RD_KAFKA_MSG_F_FREE,
-                             (void *)line, line_len, mac, strlen("00:00:00:00:00:00"), NULL);
+        const int rc = rd_kafka_produce(inst->rkt, RD_KAFKA_PARTITION_UA,
+			RD_KAFKA_MSG_F_FREE, (void *)line, line_len, mac,
+			mac_len, NULL);
         if(rc != -1) {
             break;
         }
@@ -505,7 +584,8 @@ static void strbuffer_append_packet_type(strbuffer_t *strbuff,const RADIUS_PACKE
 }
 
 /* return: 1 if data added. 0 IOC */
-static int strbuffer_append_value_pair(strbuffer_t *strbuff,VALUE_PAIR *pair){
+static int strbuffer_append_value_pair(strbuffer_t *strbuff, VALUE_PAIR *pair,
+	const char **value_appended, size_t *value_appended_len) {
 	char buffer[1024];
 	const size_t buffer_len = vp_prints_value(buffer, sizeof(buffer), pair, 0 /* quote */);
 
@@ -515,15 +595,26 @@ static int strbuffer_append_value_pair(strbuffer_t *strbuff,VALUE_PAIR *pair){
 		strbuffer_append(strbuff,pair->name);
 		strbuffer_append(strbuff,"\":\"");
 
+		if (value_appended) {
+			/* Current pos */
+			*value_appended = strbuffer_value(strbuff) +
+				strbuffer_length(strbuff);
+		}
+
+		if (value_appended_len) {
+			*value_appended_len = buffer_len;
+		}
+
 		strbuffer_append_escaped_bytes(strbuff,buffer,buffer_len,"\\\"");
 		strbuffer_append(strbuff,"\"");
 		return 1;
 	}
-	return 0;	
+	return 0;
 }
 
-static strbuffer_t *packet2buffer(const REQUEST *request,const char *enrichment,
-			size_t enrichment_len,const char **mac){
+static strbuffer_t *packet2buffer(const REQUEST *request,
+		const char *enrichment, size_t enrichment_len,
+		const char **mac, size_t *mac_len) {
 	const RADIUS_PACKET *packet = request->packet;
 	VALUE_PAIR	*pair;
 
@@ -570,8 +661,8 @@ static strbuffer_t *packet2buffer(const REQUEST *request,const char *enrichment,
 		break;
 	}
 
-	strbuffer_append_value_pair(buffer,&src_vp);
-	strbuffer_append_value_pair(buffer,&dst_vp);
+	strbuffer_append_value_pair(buffer,&src_vp, NULL, NULL);
+	strbuffer_append_value_pair(buffer,&dst_vp, NULL, NULL);
 
 	src_vp.name = "Packet-Src-IP-Port";
 	src_vp.attribute = PW_PACKET_SRC_PORT;
@@ -582,19 +673,18 @@ static strbuffer_t *packet2buffer(const REQUEST *request,const char *enrichment,
 	dst_vp.type = PW_TYPE_INTEGER;
 	dst_vp.vp_integer = packet->dst_port;
 
-	strbuffer_append_value_pair(buffer,&src_vp);
-	strbuffer_append_value_pair(buffer,&dst_vp);
+	strbuffer_append_value_pair(buffer,&src_vp, NULL, NULL);
+	strbuffer_append_value_pair(buffer,&dst_vp, NULL, NULL);
 
 	/* Write each attribute/value to the buffer */
 	for (pair = packet->vps; pair != NULL; pair = pair->next) {
 		if(0==strcmp(pair->name,MAC_RADIUS_KEY)) {
 			/* Setting mac in msg as key */
-			*mac = strbuffer_value(buffer) + strbuffer_length(buffer) +
-				strlen(",\"\":\"") + strlen(MAC_RADIUS_KEY);
+			strbuffer_append_value_pair(buffer, pair, mac,
+				mac_len);
+		} else {
+			strbuffer_append_value_pair(buffer, pair, NULL, NULL);
 		}
-
-		strbuffer_append_value_pair(buffer,pair);
-
 	}
 
 	/* Write enrichment data */
@@ -635,12 +725,14 @@ static int kafka_log_accounting(void *instance, REQUEST *request)
 	}
 
 	const char *mac = NULL;
+	size_t mac_len = 0;
 	const char *enrichment = client_enrichment_db_get(inst->client_enrichment_db,
 		request->client->shortname);
 	size_t enrichment_len = enrichment?strlen(enrichment):0;
-	strbuffer_t *json_buffer = packet2buffer(request,enrichment,enrichment_len,&mac);
+	strbuffer_t *json_buffer = packet2buffer(request,enrichment,
+		enrichment_len, &mac, &mac_len);
 	if(json_buffer){
-		return kafka_log_produce(inst,json_buffer,mac);
+		return kafka_log_produce(inst, json_buffer, mac, mac_len);
 	}else{
 		return RLM_MODULE_NOOP;
 	}
@@ -672,11 +764,13 @@ static int kafka_log_post_proxy(void *instance, REQUEST *request){
 	*/
 
 	const char *mac = NULL;
-	strbuffer_t *json_buffer = packet2buffer(request,NULL,0,&mac);
-	if(json_buffer){
-		kafka_log_produce(inst,json_buffer,mac);
+	size_t mac_len = 0;
+	strbuffer_t *json_buffer = packet2buffer(request,NULL, 0, &mac,
+								&mac_len);
+	if(json_buffer) {
+		kafka_log_produce(inst, json_buffer,mac, mac_len);
 		return RLM_MODULE_OK;
-	}else{
+	} else {
 		return RLM_MODULE_NOOP;
 	}
 }
