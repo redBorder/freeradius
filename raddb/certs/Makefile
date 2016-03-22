@@ -9,17 +9,12 @@
 #
 ######################################################################
 
-DH_KEY_SIZE	= 1024
+DH_KEY_SIZE	= 2048
 
 #
 #  Set the passwords
 #
-PASSWORD_SERVER	= `grep output_password server.cnf | sed 's/.*=//;s/^ *//'`
-PASSWORD_CA	= `grep output_password ca.cnf | sed 's/.*=//;s/^ *//'`
-PASSWORD_CLIENT	= `grep output_password client.cnf | sed 's/.*=//;s/^ *//'`
-
-USER_NAME	= `grep emailAddress client.cnf | grep '@' | sed 's/.*=//;s/^ *//'`
-CA_DEFAULT_DAYS = `grep default_days ca.cnf | sed 's/.*=//;s/^ *//'`
+-include passwords.mk
 
 ######################################################################
 #
@@ -38,13 +33,20 @@ ca: ca.der
 .PHONY: server
 server: server.pem server.vrfy
 
+passwords.mk: server.cnf ca.cnf client.cnf
+	@echo "PASSWORD_SERVER	= '$(shell grep output_password server.cnf | sed 's/.*=//;s/^ *//')'"		> $@
+	@echo "PASSWORD_CA	= '$(shell grep output_password ca.cnf | sed 's/.*=//;s/^ *//')'"		>> $@
+	@echo "PASSWORD_CLIENT	= '$(shell grep output_password client.cnf | sed 's/.*=//;s/^ *//')'"		>> $@
+	@echo "USER_NAME	= '$(shell grep emailAddress client.cnf | grep '@' | sed 's/.*=//;s/^ *//')'"	>> $@
+	@echo "CA_DEFAULT_DAYS  = '$(shell grep default_days ca.cnf | sed 's/.*=//;s/^ *//')'"			>> $@
+
 ######################################################################
 #
 #  Diffie-Hellman parameters
 #
 ######################################################################
 dh:
-	openssl dhparam -out dh $(DH_KEY_SIZE)
+	openssl gendh -out dh -2 $(DH_KEY_SIZE)
 
 ######################################################################
 #

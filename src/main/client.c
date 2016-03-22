@@ -272,17 +272,60 @@ int client_add(RADCLIENT_LIST *clients, RADCLIENT *client)
 	}
 
 	/*
-	 *	If "clients" is NULL, it means add to the global list.
+	 *	If "clients" is NULL, it means add to the global list,
+	 *	unless we're trying to add it to a virtual server...
 	 */
 	if (!clients) {
-		/*
-		 *	Initialize it, if not done already.
-		 */
-		if (!root_clients) {
-			root_clients = clients_init();
-			if (!root_clients) return 0;
+		if (client->server != NULL) {
+			CONF_SECTION *cs;
+			CONF_SECTION *subcs;
+
+			cs = cf_section_sub_find_name2(mainconfig.config,
+						       "server", client->server);
+			if (!cs) {
+				radlog(L_ERR, "Failed to find virtual server %s",
+				       client->server);
+				return 0;
+			}
+
+			/*
+			 *	If this server has no "listen" section, add the clients
+			 *	to the global client list.
+			 */
+			subcs = cf_section_sub_find(cs, "listen");
+			if (!subcs) goto global_clients;
+
+			/*
+			 *	If the client list already exists, use that.
+			 *	Otherwise, create a new client list.
+			 */
+			clients = cf_data_find(cs, "clients");
+			if (!clients) {
+				clients = clients_init();
+				if (!clients) {
+					radlog(L_ERR, "Out of memory");
+					return 0;
+				}
+
+				if (cf_data_add(cs, "clients", clients, (void *) clients_free) < 0) {
+					radlog(L_ERR, "Failed to associate clients with virtual server %s",
+					       client->server);
+					clients_free(clients);
+					return 0;
+				}
+			}
+
+		} else {
+		global_clients:
+			/*
+			 *	Initialize the global list, if not done already.
+			 */
+			if (!root_clients) {
+				root_clients = clients_init();
+				if (!root_clients) return 0;
+			}
+			clients = root_clients;
 		}
-		clients = root_clients;
 	}
 
 	if ((client->prefix < 0) || (client->prefix > 128)) {

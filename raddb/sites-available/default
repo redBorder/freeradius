@@ -577,6 +577,12 @@ post-auth {
 	Post-Auth-Type REJECT {
 		# log failed authentications in SQL, too.
 #		sql
+
+		# Insert EAP-Failure message if the request was
+		# rejected by policy instead of because of an
+		# authentication failure
+		eap
+
 		attr_filter.access_reject
 	}
 }

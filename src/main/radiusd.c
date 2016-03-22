@@ -53,6 +53,10 @@ RCSID("$Id$")
 #	define WIFEXITED(stat_val) (((stat_val) & 255) == 0)
 #endif
 
+#ifdef HAVE_OPENSSL_CRYPTO_H
+#include <openssl/ssl.h>
+#endif
+
 /*
  *  Global variables.
  */
@@ -277,13 +281,24 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
+#ifdef HAVE_OPENSSL_CRYPTO_H
+	/*
+	 *	Initialize the OpenSSL library before calling any of its
+	 *	functions.
+	 */
+	SSL_library_init();
+	SSL_load_error_strings();
+
 	/*
 	 *	Mismatch between build time OpenSSL and linked SSL,
 	 *	better to die here than segfault later.
 	 */
+#ifdef ENABLE_OPENSSL_VERSION_CHECK
 	if (ssl_check_version(mainconfig.allow_vulnerable_openssl) < 0) {
 		exit(1);
 	}
+#endif
+#endif
 
 	/*  Load the modules AFTER doing SSL checks */
 	if (setup_modules(FALSE, mainconfig.config) < 0) {

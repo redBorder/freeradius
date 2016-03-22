@@ -318,8 +318,8 @@ static size_t perl_xlat(void *instance, REQUEST *request, char *fmt, char *out,
 {
 
 	PERL_INST	*inst= (PERL_INST *) instance;
-	PerlInterpreter *perl;
-	char		params[1024], *ptr, *tmp;
+	char		params[1024], *tmp;
+	char const	*p, *q;
 	int		count;
 	size_t		ret = 0;
 	STRLEN		n_a;
@@ -349,41 +349,40 @@ static size_t perl_xlat(void *instance, REQUEST *request, char *fmt, char *out,
 #endif
 
 	{
-	dSP;
-	ENTER;SAVETMPS;
+		dSP;
+		ENTER;SAVETMPS;
 
-	ptr = strtok(params, " ");
+		PUSHMARK(SP);
 
-	PUSHMARK(SP);
+		p = fmt;
+		while ((q = strchr(p, ' '))) {
+			XPUSHs(sv_2mortal(newSVpv(p, p - q)));
 
-	while (ptr != NULL) {
-		XPUSHs(sv_2mortal(newSVpv(ptr,0)));
-		ptr = strtok(NULL, " ");
-	}
+			p = q + 1;
+		}
 
-	PUTBACK;
+		PUTBACK;
 
-	count = call_pv(inst->func_xlat, G_SCALAR | G_EVAL);
+		count = call_pv(inst->func_xlat, G_SCALAR | G_EVAL);
 
-	SPAGAIN;
-	if (SvTRUE(ERRSV)) {
-		radlog(L_ERR, "rlm_perl: perl_xlat exit %s\n",
-		       SvPV(ERRSV,n_a));
-		POPs ;
-	} else if (count > 0) {
-		tmp = POPp;
-		strlcpy(out, tmp, freespace);
-		ret = strlen(out);
+		SPAGAIN;
+		if (SvTRUE(ERRSV)) {
+			RDEBUG("ERROR: Exit %s", SvPV(ERRSV,n_a));
+			(void)POPs;
+		} else if (count > 0) {
+			tmp = POPp;
+			strlcpy(out, tmp, freespace);
+			ret = strlen(out);
 
-		radlog(L_DBG,"rlm_perl: Len is %d , out is %s freespace is %d",
-		       ret, out,freespace);
-	}
+			RDEBUG("Len is %zu , out is %s freespace is %zu", ret, out, freespace);
+		}
 
-	PUTBACK ;
-	FREETMPS ;
-	LEAVE ;
+		PUTBACK ;
+		FREETMPS ;
+		LEAVE ;
 
 	}
+
 	return ret;
 }
 /*
@@ -543,9 +542,11 @@ static void perl_store_vps(VALUE_PAIR *vp, HV *rad_hv)
 {
 	VALUE_PAIR	*nvp, *vpa, *vpn;
 	AV		*av;
-	char		namebuf[256], *name;
-	char	    buffer[1024];
+	char		namebuf[256];
+	const char 	*name;
+	char	    	buffer[1024];
 	int		attr, len;
+	size_t		namelen;
 
 	hv_undef(rad_hv);
 	nvp = paircopy(vp);
@@ -555,28 +556,39 @@ static void perl_store_vps(VALUE_PAIR *vp, HV *rad_hv)
 		attr = nvp->attribute;
 		vpa = paircopy2(nvp,attr);
 
+		/*
+		 *	Get the name for this attribute.
+		 */
+		if ((vpa->flags.has_tag) &&
+		    (vpa->flags.tag != 0)) {
+			snprintf(namebuf, sizeof(namebuf), "%s:%d",
+				 vpa->name, vpa->flags.tag);
+			name = namebuf;
+		} else {
+			name = vpa->name;
+		}
+		namelen = strlen(name);
+
 		if (vpa->next) {
+			/*
+			 *	There may be many instances of this
+			 *	attribute.  If so, create an
+			 *	intermediate array, and store them
+			 *	all.
+			 */
 			av = newAV();
-			vpn = vpa;
-			while (vpn) {
+
+			for (vpn = vpa; vpn != NULL; vpn = vpn->next) {
 				len = vp_prints_value(buffer, sizeof(buffer),
 						vpn, FALSE);
 				av_push(av, newSVpv(buffer, len));
-				vpn = vpn->next;
 			}
-			hv_store(rad_hv, nvp->name, strlen(nvp->name),
+			hv_store(rad_hv, name, namelen,
 					newRV_noinc((SV *) av), 0);
 		} else {
-			if ((vpa->flags.has_tag) &&
-			    (vpa->flags.tag != 0)) {
-				snprintf(namebuf, sizeof(namebuf), "%s:%d",
-					 nvp->name, nvp->flags.tag);
-				name = namebuf;
-			}
-
 			len = vp_prints_value(buffer, sizeof(buffer),
 					      vpa, FALSE);
-			hv_store(rad_hv, name, strlen(name),
+			hv_store(rad_hv, name, namelen,
 				 newSVpv(buffer, len), 0);
 		}
 

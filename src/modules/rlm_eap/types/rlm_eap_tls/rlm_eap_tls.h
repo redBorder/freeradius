@@ -51,12 +51,15 @@ typedef struct eap_tls_conf {
 	int		verify_depth;
 	int		file_type;
 	int		include_length;
+	int		disable_tlsv1_1;
+	int		disable_tlsv1_2;
 
 	/*
 	 *	Always < 4096 (due to radius limit), 0 by default = 2048
 	 */
 	int		fragment_size;
 	int		check_crl;
+	int		check_all_crl;
 	int		allow_expired_crl;
 	char		*check_cert_cn;
 	char		*cipher_list;

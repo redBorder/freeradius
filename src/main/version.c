@@ -34,34 +34,65 @@ RCSID("$Id$")
 
 static long ssl_built = OPENSSL_VERSION_NUMBER;
 
-/** Check build and linked versions of OpenSSL match
+/** Print the current linked version of Openssl
+ *
+ * Print the currently linked version of the OpenSSL library.
+ */
+const char *ssl_version(void)
+{
+	return SSLeay_version(SSLEAY_VERSION);
+}
+#else
+const char *ssl_version()
+{
+	return "not linked";
+}
+#endif
+
+
+/** Check built and linked versions of OpenSSL match
+ *
+ * OpenSSL version number consists of:
+ * MNNFFPPS: major minor fix patch status
+ *
+ * Where status >= 0 && < 10 means beta, and status 10 means release.
  *
  * Startup check for whether the linked version of OpenSSL matches the
  * version the server was built against.
  *
  * @return 0 if ok, else -1
  */
+#if defined(HAVE_OPENSSL_CRYPTO_H) && defined(ENABLE_OPENSSL_VERSION_CHECK)
 int ssl_check_version(int allow_vulnerable)
 {
 	long ssl_linked;
 
-	/*
-	 *	Initialize the library before calling any library
-	 *	functions.
-	 */
-	SSL_library_init();
-	SSL_load_error_strings();
-
 	ssl_linked = SSLeay();
 
-	if (ssl_linked != ssl_built) {
-		radlog(L_ERR, "libssl version mismatch."
-		       "  Built with: %lx\n  Linked: %lx",
-		       (unsigned long) ssl_built,
-		       (unsigned long) ssl_linked);
+	/*
+	 *	Status mismatch always triggers error.
+	 */
+	if ((ssl_linked & 0x0000000f) != (ssl_built & 0x0000000f)) {
+	mismatch:
+		radlog(L_ERR, "libssl version mismatch.  built: %lx linked: %lx",
+		       (unsigned long) ssl_built, (unsigned long) ssl_linked);
 
 		return -1;
-	};
+	}
+
+	/*
+	 *	Use the OpenSSH approach and relax fix checks after version
+	 *	1.0.0 and only allow moving backwards within a patch
+	 *	series.
+	 */
+	if (ssl_built & 0xf0000000) {
+		if ((ssl_built & 0xfffff000) != (ssl_linked & 0xfffff000) ||
+		    (ssl_built & 0x00000ff0) > (ssl_linked & 0x00000ff0)) goto mismatch;
+	/*
+	 *	Before 1.0.0 we require the same major minor and fix version
+	 *	and ignore the patch number.
+	 */
+	} else if ((ssl_built & 0xfffff000) != (ssl_linked & 0xfffff000)) goto mismatch;
 
 	if (!allow_vulnerable) {
 		/* Check for bad versions */
@@ -76,25 +107,6 @@ int ssl_check_version(int allow_vulnerable)
 	}
 
 	return 0;
-}
-
-/** Print the current linked version of Openssl
- *
- * Print the currently linked version of the OpenSSL library.
- */
-const char *ssl_version(void)
-{
-	return SSLeay_version(SSLEAY_VERSION);
-}
-#else
-int ssl_check_version(UNUSED int allow_vulnerable)
-{
-	return 0;
-}
-
-const char *ssl_version()
-{
-	return "not linked";
 }
 #endif
 
@@ -151,7 +163,7 @@ void version(void)
 	DEBUG3("Server core libs:");
 	DEBUG3("  ssl: %s", ssl_version());
 
-	radlog(L_INFO, "Copyright (C) 1999-2013 The FreeRADIUS server project and contributors.");
+	radlog(L_INFO, "Copyright (C) 1999-2015 The FreeRADIUS server project and contributors.");
 	radlog(L_INFO, "There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A");
 	radlog(L_INFO, "PARTICULAR PURPOSE.");
 	radlog(L_INFO, "You may redistribute copies of FreeRADIUS under the terms of the");

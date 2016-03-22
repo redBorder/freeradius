@@ -429,6 +429,24 @@ static size_t sql_escape_func(char *out, size_t outlen, const char *in)
 	size_t len = 0;
 
 	while (in[0]) {
+		size_t utf8_len;
+
+		/*
+		 *	Allow all multi-byte UTF8 characters.
+		 */
+		utf8_len = fr_utf8_char((uint8_t const *) in);
+		if (utf8_len > 1) {
+			if (outlen <= utf8_len) break;
+
+			memcpy(out, in, utf8_len);
+			in += utf8_len;
+			out += utf8_len;
+
+			outlen -= utf8_len;
+			len += utf8_len;
+			continue;
+		}
+
 		/*
 		 *	Non-printable characters get replaced with their
 		 *	mime-encoded equivalents.
@@ -803,8 +821,6 @@ static int rlm_sql_detach(void *instance)
 	paircompare_unregister(PW_SQL_GROUP, sql_groupcmp);
 
 	if (inst->config) {
-		int i;
-
 		if (inst->sqlpool) {
 			sql_poolfree(inst);
 		}

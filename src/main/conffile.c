@@ -194,6 +194,7 @@ void cf_pair_free(CONF_PAIR **cp)
 	 *	attr && value are allocated contiguous with cp.
 	 */
 
+	free((*cp)->item.filename);
 #ifndef NDEBUG
 	memset(*cp, 0, sizeof(cp));
 #endif
@@ -403,6 +404,7 @@ void cf_section_free(CONF_SECTION **cs)
 	/*
 	 * And free the section
 	 */
+	free((*cs)->item.filename);
 #ifndef NDEBUG
 	memset(*cs, 0, sizeof(cs));
 #endif
@@ -597,6 +599,9 @@ CONF_ITEM *cf_reference_item(const CONF_SECTION *parentcs,
 	const CONF_SECTION *cs = outercs;
 	char name[8192];
 	char *p;
+
+	if (cs == NULL)
+		goto no_such_item;
 
 	strlcpy(name, ptr, sizeof(name));
 	p = name;
@@ -895,9 +900,16 @@ int cf_item_parse(CONF_SECTION *cs, const char *name,
 	const char *value;
 	fr_ipaddr_t ipaddr;
 	const CONF_PAIR *cp = NULL;
+	int depth;
 	char ipbuf[128];
 
-	if (cs) cp = cf_pair_find(cs, name);
+	if (cs) {
+		depth = cs->depth;
+		cp = cf_pair_find(cs, name);
+	} else {
+		depth = 0;
+	}
+
 	if (cp) {
 		value = cp->value;
 
@@ -930,13 +942,13 @@ int cf_item_parse(CONF_SECTION *cs, const char *name,
 			return -1;
 		}
 		cf_log_info(cs, "%.*s\t%s = %s",
-			    cs->depth, parse_spaces, name, value);
+			    depth, parse_spaces, name, value);
 		break;
 
 	case PW_TYPE_INTEGER:
 		*(int *)data = strtol(value, 0, 0);
 		cf_log_info(cs, "%.*s\t%s = %d",
-			    cs->depth, parse_spaces, name, *(int *)data);
+			    depth, parse_spaces, name, *(int *)data);
 		break;
 
 	case PW_TYPE_STRING_PTR:
@@ -971,7 +983,7 @@ int cf_item_parse(CONF_SECTION *cs, const char *name,
 		}
 
 		cf_log_info(cs, "%.*s\t%s = \"%s\"",
-			    cs->depth, parse_spaces, name, value ? value : "(null)");
+			    depth, parse_spaces, name, value ? value : "(null)");
 		*q = value ? strdup(value) : NULL;
 		break;
 
@@ -1007,7 +1019,7 @@ int cf_item_parse(CONF_SECTION *cs, const char *name,
 		}
 
 		cf_log_info(cs, "%.*s\t%s = \"%s\"",
-			    cs->depth, parse_spaces, name, value ? value : "(null)");
+			    depth, parse_spaces, name, value ? value : "(null)");
 		*q = value ? strdup(value) : NULL;
 
 		/*
@@ -1039,7 +1051,7 @@ int cf_item_parse(CONF_SECTION *cs, const char *name,
 		if (strcmp(value, "*") == 0) {
 			*(uint32_t *) data = htonl(INADDR_ANY);
 			cf_log_info(cs, "%.*s\t%s = *",
-				    cs->depth, parse_spaces, name);
+				    depth, parse_spaces, name);
 			break;
 		}
 		if (ip_hton(value, AF_INET, &ipaddr) < 0) {
@@ -1049,10 +1061,10 @@ int cf_item_parse(CONF_SECTION *cs, const char *name,
 		
 		if (strspn(value, "0123456789.") == strlen(value)) {
 			cf_log_info(cs, "%.*s\t%s = %s",
-				    cs->depth, parse_spaces, name, value);
+				    depth, parse_spaces, name, value);
 		} else {
 			cf_log_info(cs, "%.*s\t%s = %s IP address [%s]",
-				    cs->depth, parse_spaces, name, value,
+				    depth, parse_spaces, name, value,
 			       ip_ntoh(&ipaddr, ipbuf, sizeof(ipbuf)));
 		}
 		*(uint32_t *) data = ipaddr.ipaddr.ip4addr.s_addr;
@@ -1064,7 +1076,7 @@ int cf_item_parse(CONF_SECTION *cs, const char *name,
 			return -1;
 		}
 		cf_log_info(cs, "%.*s\t%s = %s IPv6 address [%s]",
-			    cs->depth, parse_spaces, name, value,
+			    depth, parse_spaces, name, value,
 			    ip_ntoh(&ipaddr, ipbuf, sizeof(ipbuf)));
 		memcpy(data, &ipaddr.ipaddr.ip6addr,
 		       sizeof(ipaddr.ipaddr.ip6addr));
@@ -1080,7 +1092,7 @@ int cf_item_parse(CONF_SECTION *cs, const char *name,
 
 		cpn = cf_pair_alloc(name, value, T_OP_SET, T_BARE_WORD, cs);
 		if (!cpn) return -1;
-		cpn->item.filename = "<internal>";
+		cpn->item.filename = strdup("<internal>");
 		cpn->item.lineno = 0;
 		cf_item_add(cs, cf_pairtoitem(cpn));
 	}
@@ -1735,7 +1747,7 @@ static int cf_section_read(const char *filename, int *lineno, FILE *fp,
 			 */
 		do_set:
 			cpn = cf_pair_alloc(buf1, value, t2, t3, this);
-			cpn->item.filename = filename;
+			cpn->item.filename = strdup(filename);
 			cpn->item.lineno = *lineno;
 			cf_item_add(this, cf_pairtoitem(cpn));
 			continue;
@@ -1828,7 +1840,7 @@ static int cf_section_read(const char *filename, int *lineno, FILE *fp,
 				return -1;
 			}
 			cf_item_add(this, cf_sectiontoitem(css));
-			css->item.filename = filename;
+			css->item.filename = strdup(filename);
 			css->item.lineno = *lineno;
 
 			/*
@@ -1926,7 +1938,7 @@ int cf_file_include(const char *filename, CONF_SECTION *cs)
 		return -1;
 	}
 
-	if (!cs->item.filename) cs->item.filename = filename;
+	if (!cs->item.filename) cs->item.filename = strdup(filename);
 
 	/*
 	 *	Read the section.  It's OK to have EOF without a
@@ -1959,7 +1971,7 @@ CONF_SECTION *cf_file_read(const char *filename)
 	p = strrchr(cp->value, FR_DIR_SEP);
 	if (p) *p = '\0';
 
-	cp->item.filename = "internal";
+	cp->item.filename = strdup("<internal>");
 	cp->item.lineno = 0;
 	cf_item_add(cs, cf_pairtoitem(cp));
 
