@@ -44,3 +44,4 @@ rlm_sql_log
 rlm_kafka
 rlm_unix
 rlm_wimax
+rlm_raw
